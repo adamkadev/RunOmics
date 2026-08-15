@@ -8,14 +8,12 @@ Garmin Connect history while keeping the resulting dataset in a separate private
 repository. A fresh clone instead generates a deterministic synthetic season, so
 the complete application can be reviewed without an account, API key or database.
 
-[Live demo](#live-demo) · [Tech stack](#tech-stack) · [Architecture](#architecture)
+[Live demo](https://runomics-demo.vercel.app/) · [Tech stack](#tech-stack) · [Architecture](#architecture)
 
 ## Live demo
 
-<!-- TODO: replace with public demo URL -->
-
-**Demo deployment coming soon.** Until then, the local demo takes two commands and
-contains only fictional athlete, activity, shoe and GPS data.
+**[Open the live demo](https://runomics-demo.vercel.app/).** It contains only
+fictional athlete, activity, shoe and GPS data.
 
 ![RunOmics dashboard populated with synthetic training data](docs/screenshots/dashboard.png)
 
