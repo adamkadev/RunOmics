@@ -35,8 +35,25 @@ export async function generateMetadata({ params }: { params: Promise<{ id: strin
   return {
     title: name,
     description: stats,
-    openGraph: { title: name, description: stats, type: 'article' },
-    twitter: { card: 'summary', title: name, description: stats },
+    openGraph: {
+      title: name,
+      description: stats,
+      type: 'article',
+      images: [
+        {
+          url: '/og/runomics-social.png',
+          width: 1200,
+          height: 630,
+          alt: 'RunOmics running analytics platform',
+        },
+      ],
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title: name,
+      description: stats,
+      images: ['/og/runomics-social.png'],
+    },
   }
 }
 

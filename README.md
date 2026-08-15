@@ -241,5 +241,4 @@ for the broader visual-audit workflow.
 ## Project history
 
 [CHANGELOG.md](CHANGELOG.md) records the major product and engineering iterations. The
-repository intentionally carries no license yet; review the license choice before
-redistributing or publishing a derivative.
+package metadata declares the MIT license.

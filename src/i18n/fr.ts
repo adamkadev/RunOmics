@@ -36,7 +36,7 @@ export const fr = {
     },
   },
   meta: {
-    description: 'Tableau de bord d’analyse running respectueux de la vie privée, construit avec Next.js et des données Garmin.',
+    description: 'Tableau de bord running respectueux de la vie privée avec synchronisation Garmin, cartes et analyses d’entraînement.',
   },
 
   theme: {

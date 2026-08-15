@@ -44,7 +44,7 @@ export const en = {
     },
   },
   meta: {
-    description: 'Privacy-first running analytics dashboard built with Next.js and Garmin data.',
+    description: 'Privacy-first running analytics dashboard with Garmin sync, maps and training insights.',
   },
 
   theme: {

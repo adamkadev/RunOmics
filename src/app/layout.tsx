@@ -16,9 +16,10 @@ const spaceGrotesk = Space_Grotesk({ variable: '--font-space-grotesk', subsets: 
 const jetbrainsMono = JetBrains_Mono({ variable: '--font-jetbrains-mono', subsets: ['latin'] })
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://runomics-demo.vercel.app/'),
   applicationName: 'RunOmics',
   title: {
-    default: 'RunOmics',
+    default: 'RunOmics - Running Analytics Platform',
     template: '%s - RunOmics',
   },
   description: t.meta.description,
@@ -44,13 +45,23 @@ export const metadata: Metadata = {
   openGraph: {
     type: 'website',
     siteName: 'RunOmics',
-    title: 'RunOmics',
+    url: '/',
+    title: 'RunOmics - Running Analytics Platform',
     description: t.meta.description,
+    images: [
+      {
+        url: '/og/runomics-social.png',
+        width: 1200,
+        height: 630,
+        alt: 'RunOmics running analytics platform',
+      },
+    ],
   },
   twitter: {
-    card: 'summary',
-    title: 'RunOmics',
+    card: 'summary_large_image',
+    title: 'RunOmics - Running Analytics Platform',
     description: t.meta.description,
+    images: ['/og/runomics-social.png'],
   },
   robots: {
     index: process.env.NEXT_PUBLIC_ALLOW_INDEXING === 'true',

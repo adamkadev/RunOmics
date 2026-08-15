@@ -153,6 +153,7 @@ for (const pattern of expectedPatterns) {
 
 // --- Workflow sanity: nothing scheduled that needs secrets a fork lacks ---
 for (const f of files.filter((p) => p.startsWith('.github/workflows/'))) {
+  if (!fs.existsSync(f)) continue
   const content = fs.readFileSync(f, 'utf-8')
   const scheduled = /^\s*schedule:/m.test(content)
   const needsSecrets = /secrets\.(GARMIN_SECRET|APP_URL|RUNOMICS_DATA_REPO_|INTERNAL_NOTIFY_SECRET|PRIVACY_ZONES)/.test(content)
