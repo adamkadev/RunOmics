@@ -1,15 +1,145 @@
 # RunOmics
 
-A self-hosted running dashboard: it turns a Garmin Connect history into training-load
-trends, route maps, race predictions and per-run analysis. Built with Next.js 16,
-TypeScript, and a Python sync pipeline.
+Privacy-first running analytics dashboard built with Next.js and Garmin data.
 
-Clone it and it runs immediately on a generated demo dataset - no Garmin account, no
-API key, no database.
+RunOmics is a self-hosted dashboard for exploring training load, performance,
+activities, routes and progress. A Python pipeline can synchronize a personal
+Garmin Connect history while keeping the resulting dataset in a separate private
+repository. A fresh clone instead generates a deterministic synthetic season, so
+the complete application can be reviewed without an account, API key or database.
 
-> **Live demo:** TODO - a demo-only deployment will be linked here.
+[Live demo](#live-demo) · [Tech stack](#tech-stack) · [Architecture](#architecture)
 
-## Quick start (demo mode)
+## Live demo
+
+<!-- TODO: replace with public demo URL -->
+
+**Demo deployment coming soon.** Until then, the local demo takes two commands and
+contains only fictional athlete, activity, shoe and GPS data.
+
+![RunOmics dashboard populated with synthetic training data](docs/screenshots/dashboard.png)
+
+| Activity analysis | Fitness analytics |
+| --- | --- |
+| ![Synthetic activity route and metrics](docs/screenshots/activity-detail.png) | ![Fitness analytics and training charts](docs/screenshots/analytics.png) |
+| Route heatmap | Training plan |
+| ![Synthetic running route heatmap](docs/screenshots/map.png) | ![Weekly training plan](docs/screenshots/plan.png) |
+
+![Personal records and predictions generated from demo data](docs/screenshots/records.png)
+
+All screenshots are generated from the repository's synthetic dataset.
+
+## What it does
+
+### Training and performance
+
+- Tracks CTL, ATL and TSB to explain fitness, fatigue and form
+- Shows VO2max, lactate-threshold and heart-rate-zone trends
+- Breaks down training load, status and easy-to-hard distribution
+- Surfaces race predictions and rules-based training insights
+
+### Activity analysis
+
+- Combines route, heart-rate, pace, cadence and elevation views
+- Displays splits, best efforts, weather, training effect and running dynamics
+- Estimates aerobic decoupling and finds similar runs
+- Generates a shareable PNG summary card
+
+### Planning
+
+- Places completed and planned workouts on weekly and monthly views
+- Shows training phases, weekly purpose and the next race
+- Connects planned session types to athlete-specific pace zones
+
+### Progress
+
+- Collects personal bests, records, milestones and recurring routes
+- Tracks annual goals against an eight-week rolling projection
+- Monitors shoe mileage and wear thresholds
+- Summarizes lifetime volume, consistency and athlete profile data
+
+## Engineering highlights
+
+- **Next.js 16 App Router and React 19** with server components, client islands,
+  static generation and hourly ISR
+- **TypeScript and domain-oriented layers** separating pure rules, use cases,
+  repositories and presentation
+- **Server-only JSON repositories** for activity data, with no activity database
+  and no dataset shipped through `public/`
+- **Deterministic demo mode** that produces 18 months of realistic fictional data
+  from a fixed seed
+- **Python Garmin and FIT pipeline** for activity ingestion, metric extraction,
+  weather enrichment, route simplification and GPS privacy-zone cropping
+- **Private data separation** through an independent repository hydrated only at
+  build or synchronization time
+- **MapLibre maps** with MapTiler basemaps when configured and a deterministic SVG
+  route preview when no map token is available
+- **Optional Firebase and Gemini integrations** for owner-only settings,
+  notifications and cached AI summaries; the core dashboard works without either
+- **GitHub Actions** for Node and Python CI, E2E checks and opt-in personal sync jobs
+- **Vitest, Playwright, pytest and axe-core** for domain rules, repositories,
+  components, accessibility and browser workflows
+- **Security controls** including CSP headers, internal API authentication,
+  secret scanning checks and a server-only data boundary
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Personal[Personal deployment]
+    Garmin[Garmin Connect] --> Sync[GitHub Actions<br/>Python and FIT pipeline]
+    Sync --> PrivateData[Separate private<br/>data repository]
+    PrivateData --> PersonalBuild[Vercel prebuild]
+    PersonalBuild --> PersonalFiles[server-only data/]
+    PersonalFiles --> PersonalApp[Next.js]
+  end
+
+  subgraph Demo[Public demo]
+    Clone[Fresh clone or<br/>demo-only Vercel] --> Generator[Deterministic<br/>demo generator]
+    Generator --> DemoFiles[server-only data/]
+    DemoFiles --> DemoApp[Next.js]
+  end
+
+  PersonalApp --> Browser[Browser]
+  DemoApp --> Browser
+  Browser -. "✕ cannot fetch /data/*.json" .-> Boundary[Server filesystem boundary]
+```
+
+At render time, server components call application use cases, which read plain
+JSON through infrastructure repositories. Only serializable summaries cross into
+interactive client components. Large GPS traces and sample arrays remain on the
+server except on the single activity detail page that needs them.
+
+```text
+src/domain/                       Models and pure training rules
+src/application/usecases/         Render-time queries and aggregation
+src/infrastructure/repositories/  Server-only JSON and optional Firestore adapters
+src/app/                          Next.js routes and server components
+src/components/                   Feature UI and client-side interaction
+scripts/                          Demo generator and Garmin/FIT sync pipeline
+```
+
+## Privacy and security design
+
+- Real Garmin data is never committed to this public source repository.
+- A personal dataset can live in a separate private repository and be fetched into
+  the deployment during prebuild.
+- GPS trace endpoints can be cropped around configured privacy zones before an
+  activity is stored.
+- Runtime JSON lives in repository-root `data/`, outside Next.js `public/`, and is
+  read only by server-side modules.
+- The public demo dataset is fully synthetic, including athlete values, activity
+  IDs, gear IDs, routes, races and locations.
+- Credentials belong in local environment files, GitHub Actions secrets or Vercel
+  project configuration, never in the repository.
+- `scripts/verify_no_private_data.mjs` checks tracked files for data directories,
+  activity binaries and common credential shapes.
+
+RunOmics is an independent project and is not affiliated with or endorsed by Garmin.
+
+## Quick start
+
+Requirements: Node.js 20 or newer.
 
 ```bash
 git clone https://github.com/adamkadev/RunOmics.git
@@ -18,315 +148,100 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000). With no private-data variables,
+the `predev` hook runs `scripts/prepare-data.mjs`, which creates the deterministic
+dataset in `data/`. The same preparation hook runs before build, lint, typecheck and
+unit tests, and becomes a no-op once the directory is populated.
 
-`npm run dev` first runs `npm run prepare:data`, which finds no private data source and
-generates a **deterministic synthetic dataset** into `data/` instead
-(`scripts/generate_demo_data.mjs`): 18 months of runs for a fictional "Demo Runner",
-procedurally-generated GPS routes over open water, invented shoes, races and goals.
-Every page renders with real-looking content. Nothing in it comes from anyone's actual
-training history.
-
-The same hook runs before `dev`, `build`, `lint`, `typecheck` and `test`, and is a no-op
-once `data/` exists - so a fresh clone can lint, typecheck, test and build with zero
-configuration.
+To recreate the demo dataset:
 
 ```bash
-npm run lint        # ESLint (next/core-web-vitals + TS)
-npm run typecheck   # tsc --noEmit
-npm test            # Vitest: usecases, lib helpers, component tests (RTL), a11y smoke (axe-core)
-npm run build       # production build
+rm -rf data
+npm run prepare:data
 ```
 
-Python-side tests need their own dependencies:
+`data/` is gitignored. Never move it under `public/` or commit it.
 
-```bash
-pip install -r scripts/requirements-dev.txt
-python -m pytest scripts/tests/ -q
-```
+## Demo-only Vercel deployment
 
-## Features
+Import this repository into a dedicated Vercel project with the default Next.js
+settings. Do not configure a private data source: the normal build command runs
+`prepare-data`, generates the synthetic dataset and then builds the application.
 
-- **Dashboard** - training status banner, today's hero card, week snapshot, and the
-  fitness / fatigue / form trio (CTL / ATL / TSB) over a training-load chart
-- **Activity detail** - GPS route map cross-linked to HR, pace and elevation charts,
-  running dynamics, similar runs, and a shareable PNG card
-- **Analytics** - four tabs answering one question each: am I fit, am I getting faster,
-  how much am I running, is my training healthy
-- **Goals** - annual distance goal with an ahead / on-track / behind projection from a
-  rolling 8-week rate, plus season races and per-distance targets
-- **Records** - all-time bests detected from FIT files, form at the time of each PB,
-  Riegel race predictions, and distance milestones
-- **Plan** - planned workouts, week purpose, training-status calendar, next race
-- **Shoes** - per-pair mileage and wear alerts
-- **Map** - MapLibre route-density heatmap across the whole history
-- **Dark mode** - system preference + manual toggle, with several accent palettes
+The public demo should not receive personal deployment credentials, including Garmin,
+private-repository, Firebase Admin, notification or real Firebase client values.
+Gemini is also optional: without an API key, the interface keeps its deterministic
+rules-based copy.
 
-## Architecture
+Set `NEXT_PUBLIC_ALLOW_INDEXING=true` only on the public portfolio deployment when it
+is ready to appear in search results. Indexing remains disabled by default, which is
+safer for personal self-hosted deployments.
 
-```
-src/
-  domain/                      Model + pure rules, no I/O
-  application/usecases/        Pure data computation, one file per query
-  infrastructure/repositories/ Read data/* (server-only); Firestore for cached AI insights
-  app/                         Routes: server components fetch via usecases,
-                               render client components for charts/interactivity
-  i18n/                        Every user-facing string (en + fr)
-  lib/                         Formatters, colors, math, hooks
-scripts/                       Python Garmin sync pipeline + Node data/build helpers
-```
+| Optional setting | Behavior when absent |
+| --- | --- |
+| `NEXT_PUBLIC_MAPTILER_TOKEN` | Maps show a deterministic route preview without a basemap. |
+| `NEXT_PUBLIC_FIREBASE_*` | Sign-in, notes and notifications stay disabled; read-only analytics still work. |
+| `GEMINI_API_KEY` | AI calls are skipped and rules-based insights remain visible. |
+| `NEXT_PUBLIC_LOCALE` | English is used; set `fr` for the French build. |
 
-Data flow at render time:
+## Personal data pipeline
 
-```
-data/*.json  ->  getXxx() usecase  ->  page.tsx (server)  ->  *Client.tsx (browser)
-```
+Personal deployments are optional and deliberately separate from demo mode. The main
+workflow is:
 
-There is no database. Every page is prerendered with ISR (`revalidate = 3600`).
+1. A Python job authenticates to Garmin Connect and downloads new activity FIT files.
+2. The pipeline derives activity metrics, downsamples chart series, enriches weather
+   and crops configured GPS privacy zones.
+3. JSON output is pushed to a separately secured data repository.
+4. Vercel fetches that repository during prebuild into server-only `data/`.
 
-### Where the data lives
-
-`data/` sits at the repository root, deliberately **outside `public/`**: nothing in it is
-reachable over HTTP, and only server-side code reads it (through
-`src/infrastructure/dataPath.ts`, marked `server-only`). It is never committed - see
-`.gitignore`.
-
-`scripts/prepare-data.mjs` populates it before every dev/build:
-
-| `RUNOMICS_DATA_REPO_URL` | What happens |
-|---|---|
-| unset (default) | A deterministic synthetic dataset is generated. This is what a clone gets. |
-| set | The real dataset is cloned from that private repository into `data/`. |
-
-That is the whole privacy design: **a personal deployment keeps its real Garmin history
-in a separate private repository and pulls it in at build time, so the application
-repository can be public without ever containing a run.**
-
-Activities are stored one JSON file per month (`data/activities/2026-07.json`, plus an
-`index.json` listing the available months), so a sync rewrites only the months it
-touched instead of one large file.
-
----
-
-## Personal deployment: Garmin sync
-
-Everything below is **optional**. Skip it entirely if you only want to run or read the
-project - demo mode covers that.
-
-### Prerequisites
-
-- Node.js >= 20, Python >= 3.11
-- A Garmin Connect account
-- A second, **private** GitHub repository to hold your dataset (e.g. `your-username/runomics-data`)
-- A [MapTiler](https://www.maptiler.com/) key if you want route maps (free tier is enough)
-
-### 1. Python dependencies and a Garmin token
-
-```bash
-pip install -r scripts/requirements.txt
-python scripts/get_secret.py
-```
-
-`get_secret.py` authenticates with Garmin Connect through
-[garth](https://github.com/matin/garth) and prints a `GARMIN_SECRET` string (a base64
-OAuth token) to put in your environment.
-
-> **Note on garth's deprecation**: garth is [no longer maintained](https://github.com/matin/garth/discussions/222)
-> because Garmin keeps breaking its *login* flow. This project only uses that flow here,
-> once, to mint the token - `sync.py` merely loads and refreshes the existing OAuth
-> token, which continues to work (the underlying OAuth1 token lasts ~1 year). No
-> migration is planned while this holds: the community alternatives are
-> browser-automation or TLS-impersonation workarounds in an ongoing cat-and-mouse game,
-> i.e. no more future-proof than staying put. If `get_secret.py` stops working when your
-> token expires, check that discussion for the current workaround before switching
-> libraries.
-
-### 2. Environment variables
-
-Copy `.env.example` to `.env.local` and fill in what you need. Every value in
-`.env.example` is a placeholder. The variables that matter:
-
-| Variable | Used for |
-|---|---|
-| `GARMIN_SECRET` | `scripts/sync.py` only - never needed by the web app |
-| `PRIVACY_ZONES`, `PRIVACY_RADIUS_M` | Crops GPS traces near the listed `[lon, lat]` points before anything is stored |
-| `RUNOMICS_DATA_REPO_URL`, `RUNOMICS_DATA_REPO_TOKEN` | Your private dataset repository and a fine-grained PAT scoped to it |
-| `NEXT_PUBLIC_MAPTILER_TOKEN` | Route maps |
-| `NEXT_PUBLIC_FIREBASE_*` | Client-side sign-in, activity notes, push notification tokens |
-| `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` | Server-side notification state and push delivery |
-| `NEXT_PUBLIC_OWNER_EMAIL` | The Google account allowed to edit notes/settings |
-| `INTERNAL_NOTIFY_SECRET` | Authenticates the GitHub Actions calls to `/api/internal/*` |
-| `NEXT_PUBLIC_LOCALE` | UI language, `en` (default) or `fr`, applied at build time |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Optional AI-written verdicts; without a key the cards keep their rules-based copy |
-
-`.env.local` is gitignored. Never commit real values.
-
-**Set `PRIVACY_ZONES` before your first sync.** `scripts/processing/privacy.py` refuses to
-process real routes without it, so a home address cannot silently end up in the dataset.
-
-### 3. Sync
-
-```bash
-node scripts/fetch_private_data.mjs public/data   # hydrate the sync workspace
-python scripts/sync.py                            # fetch from Garmin, parse FIT, write JSON
-node scripts/push_private_data.mjs public/data    # push to the private data repository
-```
-
-`public/data/` here is only the pipeline's scratch workspace - `prepare-data.mjs` moves it
-into the server-only `data/` before the app is built, and it is gitignored either way.
-The first run may take several minutes.
-
-```bash
-python scripts/sync.py --limit 10     # only the last 10 new activities
-python scripts/sync.py --force        # re-sync everything
-python scripts/sync.py --all-types    # include non-running activities
-python scripts/reprocess.py           # re-parse cached FIT files after a parser change
-```
-
-Tokens are passed to git through `GIT_ASKPASS` and read from the process environment
-only, so a PAT never lands in `ps`, in `.git/config`, or in a build log.
-
-### 4. Deploy
-
-Import the repository on [Vercel](https://vercel.com/new) with the default Next.js
-settings and set the variables above as project env vars - except `GARMIN_SECRET`, which
-never runs there. Add `APP_URL`, `INTERNAL_NOTIFY_SECRET` and the `RUNOMICS_DATA_REPO_*`
-pair as **GitHub Actions repository secrets** as well, for the sync workflow.
-
-`.github/workflows/sync.yml` runs the whole pipeline on a runner: hydrate, sync,
-push to the private data repository, trigger a redeploy, then poke the post-sync check
-endpoints. It is **`workflow_dispatch`-only in this repository** and fails fast when the
-secrets are absent, so a fork never runs a red job every night. Add your own `schedule:`
-block once a manual run has succeeded - the cron that suits a personal deployment is
-commented at the top of the file. `daily-session-reminder.yml`, `weekly-reminder.yml` and
-`stale-sync-check.yml` are manual-only for the same reason.
-
----
-
-## Configuration files
-
-Goals, official PBs and the athlete profile are plain JSON in `data/` - in a personal
-deployment they live in the private dataset repository and are edited by hand. The
-snippets below use values from the generated demo dataset.
-
-```json
-// data/goals.json
-{
-  "years": [
-    {
-      "year": 2026,
-      "annualDistanceKm": 1200,
-      "targets": [
-        { "distance": "5K",            "target": "19:30" },
-        { "distance": "10K",           "target": "40:30" },
-        { "distance": "Half-Marathon", "target": "1:30:00" },
-        { "distance": "Marathon",      "target": null }
-      ]
-    }
-  ]
-}
-```
-
-`target` is `"mm:ss"` or `"h:mm:ss"` (`null` = no target set).
-
-```json
-// data/pbs.json - official race times (chip time). Take priority over the
-// best efforts auto-detected from FIT files in the Records section.
-{
-  "years": [
-    {
-      "year": 2026,
-      "entries": [
-        { "distance": "5K",            "time": "19:05",   "activityId": "90000161" },
-        { "distance": "Half-Marathon", "time": "1:27:44", "activityId": "90000199" }
-      ]
-    }
-  ]
-}
-```
-
-Valid `distance` values: `"1K"`, `"5K"`, `"10K"`, `"Half-Marathon"`, `"Marathon"`.
-`activityId` is optional and links the card to that activity's detail page.
-
-```json
-// data/athlete.json - training zones used across Analytics and Profile
-{
-  "displayName": "Demo Runner",
-  "thresholdPowerWatts": null,
-  "lthrBpm": 172,
-  "thresholdPaceSecPerKm": 258,
-  "hrZoneBoundsBpm": [128, 145, 160, 172, 182],
-  "restingHrBpm": 50,
-  "maxHrBpm": 189,
-  "vmaKmh": 17.5,
-  "deviceName": "Forerunner 265",
-  "deviceSince": "2025-01-15"
-}
-```
-
-Every field except `displayName` and `thresholdPowerWatts` is fetched from Garmin
-Connect and merged in by each `scripts/sync.py` run (see `scripts/garmin/athlete.py`):
-existing values survive a failed fetch, and `maxHrBpm` only ever ratchets up. Set any
-field to `null` to clear it - the app falls back to a population-average default where
-one exists.
-
-### `public/events/` - race photos
-
-Drop a photo named `{activityId}.jpg` (or `.png`, `.webp`) into `public/events/` and it
-becomes the cover image on that activity's PB card. The directory is gitignored: photos
-stay local to a deployment.
-
----
-
-## Tests & quality
-
-CI (`.github/workflows/ci.yml`) runs pytest, a production-dependency audit
-(`npm audit --omit=dev --audit-level=high`), lint, typecheck and the Vitest suite on every
-push and PR. It needs **no secrets** and builds against the generated demo dataset.
-
-```bash
-npm run test:coverage  # Vitest with a v8 coverage report (text + lcov)
-npm run test:e2e       # Playwright against a real production build
-npm run screenshots    # Playwright screenshot audit into screenshots/output/
-npm run analyze        # production build with @next/bundle-analyzer treemaps
-```
-
-`.env.e2e` carries a placeholder Firebase client config - the app needs one to boot, and
-the current specs cover read-only pages built from `data/*.json`, so no real project is
-involved. Sign-in-gated flows (Settings, note editing) are not covered yet: Google's
-OAuth popup needs a test-only auth bypass first.
-
-`scripts/verify_no_private_data.mjs` is a pre-publication check: it scans the tracked
-tree for data directories, env files, FIT binaries and credential shapes that must never
-ship. Run it before making any fork of this project public.
-
-```bash
-node scripts/verify_no_private_data.mjs
-```
-
-The improvement backlog lives in
-[`docs/product-improvement-todolist.md`](docs/product-improvement-todolist.md).
-
-### Monitoring
-
-`GET /api/internal/health` (authenticated with `x-internal-secret`) reports the last
-synced activity date and flags the data as `stale` after 7 days without one - point an
-uptime monitor at it to catch a silently broken sync.
-
----
+The synchronization workflows are manual-only in this public repository, fail fast
+when required secrets are missing and can be scheduled by a self-hoster after a manual
+run succeeds. See [.env.example](.env.example) for placeholder configuration and the
+scripts under [scripts/](scripts/) for the pipeline entry points.
 
 ## Tech stack
 
-| Layer | Tech |
-|-------|------|
-| Framework | [Next.js 16](https://nextjs.org/) (App Router, SSG + ISR) |
-| Language | TypeScript 5 |
-| Styling | Tailwind CSS v4 |
-| Charts | [Recharts](https://recharts.org/) |
-| Maps | [MapLibre GL](https://maplibre.org/) + [MapTiler](https://www.maptiler.com/) |
-| Icons | [Lucide](https://lucide.dev/) |
-| Dark mode | [next-themes](https://github.com/pacocoursey/next-themes) |
-| Tests | [Vitest](https://vitest.dev/), [Playwright](https://playwright.dev/), [axe-core](https://github.com/dequelabs/axe-core), [pytest](https://docs.pytest.org/) |
-| Garmin auth | [garth](https://github.com/matin/garth) |
-| FIT parsing | [garmin-fit-sdk](https://pypi.org/project/garmin-fit-sdk/) |
-| Weather | [Open-Meteo](https://open-meteo.com/) (no key) |
+| Area | Technology |
+| --- | --- |
+| Web | Next.js 16, React 19, TypeScript 5 |
+| UI | Tailwind CSS v4, Recharts, Lucide, next-themes |
+| Maps | MapLibre GL, optional MapTiler basemaps |
+| Data processing | Python, Garmin FIT SDK, Open-Meteo |
+| Optional services | Firebase, Gemini, Vercel Analytics and Speed Insights |
+| Testing | Vitest, Testing Library, Playwright, axe-core, pytest |
+| Delivery | GitHub Actions, Vercel, ISR |
+
+## Testing and quality
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run test:coverage
+npm run build
+python -m pytest scripts/tests/ -q
+npm run test:e2e
+node scripts/verify_no_private_data.mjs
+```
+
+CI runs the Node checks, production dependency audit, Python tests and Playwright
+suite against generated demo data. No private credentials are required.
+
+## Screenshots
+
+```bash
+npm run screenshots             # mobile visual-audit matrix, gitignored output
+npm run screenshots:portfolio   # six tracked desktop portfolio images
+```
+
+The portfolio capture is fixed to a desktop viewport, English locale, dark theme and
+the default accent. It builds against the synthetic dataset and does not require
+external map or Firebase credentials. See [screenshots/README.md](screenshots/README.md)
+for the broader visual-audit workflow.
+
+## Project history
+
+[CHANGELOG.md](CHANGELOG.md) records the major product and engineering iterations. The
+repository intentionally carries no license yet; review the license choice before
+redistributing or publishing a derivative.

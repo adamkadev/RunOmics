@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { MapPin, Maximize2, Minimize2 } from 'lucide-react'
-import type { LngLatBounds, Map as MapLibreMap, Marker } from 'maplibre-gl'
+import type { GeoJSONSource, LngLatBounds, Map as MapLibreMap, Marker } from 'maplibre-gl'
 import { cn } from '@/lib/utils'
 import { maptilerStyleUrl } from '@/lib/maptiler'
 import { CHART_COLORS, MAP_COLORS, PACE_ROUTE_COLORS } from '@/lib/colors'
@@ -13,6 +13,7 @@ import type { ShoeTag } from '@/domain/shoe/types'
 import { ShoePairTag } from '@/components/activities/ShoePairTag'
 import { WeatherChips } from './WeatherChips'
 import { t } from '@/i18n'
+import { RoutePreview } from '@/components/map/RoutePreview'
 
 interface Props {
   route: [number, number][]
@@ -166,8 +167,10 @@ export default function ActivityMap({ route, paceSamples, hoverFraction, weather
           const eased = 1 - Math.pow(1 - progress, 3)
           const count = Math.floor(eased * total)
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ;(map.getSource('route') as any)?.setData({ type: 'FeatureCollection', features: segments.slice(0, count) })
+          ;(map.getSource('route') as GeoJSONSource)?.setData({
+            type: 'FeatureCollection',
+            features: segments.slice(0, count),
+          })
 
           if (progress < 1) {
             animFrameRef.current = requestAnimationFrame(animate)
@@ -230,7 +233,40 @@ export default function ActivityMap({ route, paceSamples, hoverFraction, weather
     }
   }, [hoverFraction, route])
 
-  if (!hasToken) return <MapUnavailable className={className} />
+  if (!hasToken) {
+    return (
+      <div className={cn('relative min-h-[280px] overflow-hidden rounded-xl', className)}>
+        <RoutePreview routes={[route]} ariaLabel={t.activity.map.routeMap} className="h-full w-full" />
+
+        {(weather || activityType) && (
+          <div className="absolute left-2 right-2 top-2 z-10 flex flex-wrap items-center gap-1.5">
+            {weather && <WeatherChips weather={weather} />}
+            {activityType && (
+              <span
+                className="rounded-[10px] px-2.5 py-1.5 text-xs font-bold uppercase tracking-wide"
+                style={{
+                  background: ACTIVITY_TYPE_CONFIG[activityType].chartColor,
+                  color: MAP_COLORS.chipInkOnAmber,
+                }}
+              >
+                {t.activityTypes[activityType]}
+              </span>
+            )}
+          </div>
+        )}
+
+        {shoe && (
+          <div className="pointer-events-none absolute bottom-2 left-2 z-10">
+            <ShoePairTag shoe={shoe} />
+          </div>
+        )}
+
+        <span className="glass-map-chip pointer-events-none absolute bottom-2 right-2 z-10 px-3 py-2 text-xs font-medium text-subtle">
+          {t.activity.map.routePreview}
+        </span>
+      </div>
+    )
+  }
 
   const tree = (
     <div
@@ -314,21 +350,6 @@ export function NoRouteMap({ className }: { className?: string }) {
       <MapPin size={24} className="text-subtle" />
       <p className="text-sm text-subtle">{t.activity.map.noTrace}</p>
       <p className="text-xs text-subtle">{t.activity.map.noTraceHint}</p>
-    </div>
-  )
-}
-
-function MapUnavailable({ className }: { className?: string }) {
-  return (
-    <div
-      className={cn(
-        'flex min-h-[280px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-muted',
-        className
-      )}
-    >
-      <MapPin size={24} className="text-subtle" />
-      <p className="text-sm text-subtle">{t.activity.map.mapUnavailable}</p>
-      <p className="text-xs text-subtle">{t.activity.map.mapUnavailableHint}</p>
     </div>
   )
 }

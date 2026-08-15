@@ -45,7 +45,7 @@ function HeaderMark({ size = 24 }: { size?: number }) {
   )
 }
 
-export function Sidebar() {
+export function Sidebar({ demoMode }: { demoMode: boolean }) {
   const pathname = usePathname()
   const currentHref = activeNavHref(pathname, NAV_HREFS)
 
@@ -63,6 +63,11 @@ export function Sidebar() {
             {t.brand.namePrefix}
             <span className="text-accent-text">{t.brand.nameSuffix}</span>
           </span>
+          {demoMode && (
+            <span className="rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 text-micro font-semibold uppercase tracking-[0.08em] text-accent-text">
+              {t.brand.demoData}
+            </span>
+          )}
         </Link>
 
         <div className="mx-4 h-px shrink-0 bg-foreground/[0.08]" />

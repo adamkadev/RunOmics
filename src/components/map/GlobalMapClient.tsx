@@ -12,6 +12,7 @@ import { YearPicker } from "./YearPicker";
 import { TypePicker } from "./TypePicker";
 import { HeatLegend } from "./HeatLegend";
 import { useMapRoutes } from "./useMapRoutes";
+import { RoutePreview } from "./RoutePreview";
 import { coordLabel, matchesFilters, type HeatFilters } from "./mapUtils";
 
 // Canonical order for the type filter (fastest -> easiest), matching the rest of the app.
@@ -31,6 +32,7 @@ interface Props {
 
 export function GlobalMapClient({ data }: Props) {
   const { clusters, routeMeta } = data;
+  const hasMapToken = Boolean(process.env.NEXT_PUBLIC_MAPTILER_TOKEN);
   const [selectedIdx, setSelectedIdx] = useState(data.defaultClusterIdx);
   const [selectedYear, setSelectedYear] = useState<string | null>(null);
   const [selectedType, setSelectedType] = useState<ActivityType | null>(null);
@@ -100,6 +102,9 @@ export function GlobalMapClient({ data }: Props) {
       clusters[selectedIdx]?.routeIndices.filter((i) => matchesFilters(routeMeta[i], filters)) ?? [],
     [clusters, selectedIdx, routeMeta, filters],
   );
+  const visibleRoutes = visibleIndices
+    .map((index) => routes[index])
+    .filter((route): route is [number, number][] => Boolean(route));
 
   // Shared by the zone dropdown and the world-view bubbles, so either path exits
   // world view the same way and hands the camera back to the per-zone effect.
@@ -153,7 +158,16 @@ export function GlobalMapClient({ data }: Props) {
 
   return (
     <div className={isFullscreen ? "fixed inset-0 z-50 bg-background" : "relative h-full w-full"}>
-      <div ref={containerRef} role="img" aria-label={t.pages.map.title} className="h-full w-full" />
+      {hasMapToken ? (
+        <div ref={containerRef} role="img" aria-label={t.pages.map.title} className="h-full w-full" />
+      ) : (
+        <RoutePreview
+          routes={visibleRoutes}
+          ariaLabel={t.pages.map.routePreview}
+          className="h-full w-full"
+          dense
+        />
+      )}
 
       <div
         className={[
@@ -177,12 +191,10 @@ export function GlobalMapClient({ data }: Props) {
         </div>
       </div>
 
-      {!process.env.NEXT_PUBLIC_MAPTILER_TOKEN && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-          <span className="glass-map-chip px-4 py-2 text-xs font-medium text-subtle">
-            {t.pages.map.mapUnavailable}
-          </span>
-        </div>
+      {!hasMapToken && (
+        <span className="glass-map-chip pointer-events-none absolute bottom-3 left-3 z-10 px-3 py-2 text-xs font-medium text-subtle">
+          {t.pages.map.routePreview}
+        </span>
       )}
 
       {!worldView && visibleIndices.length === 0 && (

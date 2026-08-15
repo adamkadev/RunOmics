@@ -19,9 +19,10 @@ interface Props {
   lastSyncedAt: string | null
   activityCount: number
   device?: SyncDevice
+  demoMode: boolean
 }
 
-export function SettingsClient({ lastSyncedAt, activityCount, device }: Props) {
+export function SettingsClient({ lastSyncedAt, activityCount, device, demoMode }: Props) {
   // Without the public Firebase config, start signed-out (theme/accent
   // settings still work) instead of spinning forever waiting for auth.
   const [user, setUser] = useState<User | null | 'loading'>(
@@ -90,15 +91,22 @@ export function SettingsClient({ lastSyncedAt, activityCount, device }: Props) {
           </GlassSurface>
         </section>
 
-        <div className="flex flex-col items-center gap-6 px-4 py-8">
-          <button
-            onClick={handleSignIn}
-            disabled={signingIn}
-            className="flex items-center gap-2.5 rounded-xl bg-accent px-6 py-3.5 text-sm font-semibold text-accent-foreground transition-colors hover:bg-accent/90 active:bg-accent/80 disabled:opacity-60"
-          >
-            {signingIn ? t.settings.auth.signingIn : t.settings.auth.signIn}
-          </button>
-        </div>
+        {demoMode ? (
+          <GlassSurface variant="card" className="p-5">
+            <p className="text-sm font-semibold text-foreground">{t.settings.demo.title}</p>
+            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.settings.demo.body}</p>
+          </GlassSurface>
+        ) : (
+          <div className="flex flex-col items-center gap-6 px-4 py-8">
+            <button
+              onClick={handleSignIn}
+              disabled={signingIn}
+              className="flex items-center gap-2.5 rounded-xl bg-accent px-6 py-3.5 text-sm font-semibold text-accent-foreground transition-colors hover:bg-accent/90 active:bg-accent/80 disabled:opacity-60"
+            >
+              {signingIn ? t.settings.auth.signingIn : t.settings.auth.signIn}
+            </button>
+          </div>
+        )}
 
         <Toast toast={toast} leaving={leaving} />
       </div>

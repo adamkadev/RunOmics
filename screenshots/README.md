@@ -1,5 +1,21 @@
 # Screenshot audit
 
+## Portfolio set
+
+The README uses a separate set of six desktop screenshots generated from the
+synthetic dataset. They use a consistent 1440 x 1000 viewport, dark theme and
+default accent, and are written to `docs/screenshots/` so GitHub can render them.
+
+```bash
+npm run screenshots:portfolio
+```
+
+The portfolio run captures Dashboard, one synthetic activity, Analytics, Map,
+Plan and Records. Without a MapTiler key, route screens use the built-in
+SVG preview instead of an empty or credential-dependent map.
+
+The broader visual audit below remains mobile-first and writes gitignored output.
+
 Automated **light + dark mode** screen captures of every page in RunOmics, in
 any of the **accent palettes**, for visual auditing and "does it still render?"
 spot checks. The app is phone-first, so shots are taken through an **iPhone 13**

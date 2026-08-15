@@ -16,11 +16,13 @@ const spaceGrotesk = Space_Grotesk({ variable: '--font-space-grotesk', subsets: 
 const jetbrainsMono = JetBrains_Mono({ variable: '--font-jetbrains-mono', subsets: ['latin'] })
 
 export const metadata: Metadata = {
+  applicationName: 'RunOmics',
   title: {
     default: 'RunOmics',
     template: '%s - RunOmics',
   },
   description: t.meta.description,
+  keywords: ['running analytics', 'Garmin', 'training load', 'data visualization', 'MapLibre'],
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
@@ -51,8 +53,8 @@ export const metadata: Metadata = {
     description: t.meta.description,
   },
   robots: {
-    index: false,
-    follow: false,
+    index: process.env.NEXT_PUBLIC_ALLOW_INDEXING === 'true',
+    follow: process.env.NEXT_PUBLIC_ALLOW_INDEXING === 'true',
   },
 }
 
@@ -82,7 +84,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }catch(e){}`}
         </Script>
         <Providers>
-          <AppShell>{children}</AppShell>
+          <AppShell demoMode={!process.env.RUNOMICS_DATA_REPO_URL}>{children}</AppShell>
         </Providers>
         <ServiceWorkerRegistration />
         <Analytics />

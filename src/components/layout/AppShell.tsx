@@ -19,7 +19,7 @@ function getScrollPositions(): Record<string, number> {
   }
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({ children, demoMode }: { children: React.ReactNode; demoMode: boolean }) {
   const pathname = usePathname()
   const isPopNavigation = useRef(false)
 
@@ -64,7 +64,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             background: 'linear-gradient(to bottom, var(--background) 30%, transparent)',
           }}
         />
-        <Sidebar />
+        <Sidebar demoMode={demoMode} />
         <main className="min-h-screen lg:ml-[248px]">
           <div className="mx-auto max-w-5xl px-4 pb-28 pt-[max(env(safe-area-inset-top),20px)] sm:px-6 lg:pb-8 lg:pt-8">
             <PageTransition>{children}</PageTransition>

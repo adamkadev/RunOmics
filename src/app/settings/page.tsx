@@ -18,6 +18,7 @@ export default function SettingsPage() {
       lastSyncedAt={lastSyncedAt}
       activityCount={activityCount}
       device={deviceName ? { name: deviceName, since: deviceSince } : undefined}
+      demoMode={!process.env.RUNOMICS_DATA_REPO_URL}
     />
   )
 }

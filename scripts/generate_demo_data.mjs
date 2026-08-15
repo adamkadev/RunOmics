@@ -134,6 +134,14 @@ function generateRoute(rng, distanceKm, center) {
   return points
 }
 
+function activityRouteCenter(center, dayOffset) {
+  const phase = dayOffset * 0.71
+  return [
+    center[0] + Math.sin(phase) * 0.025 + Math.sin(phase * 0.37) * 0.008,
+    center[1] + Math.cos(phase) * 0.018 + Math.cos(phase * 0.43) * 0.006,
+  ]
+}
+
 function smoothSeries(rng, length, base, spread) {
   const out = []
   let prev = base
@@ -198,7 +206,8 @@ function buildActivities(rng, endDate) {
 
     const hrZones = buildHrZones(rng, durationSeconds, session.type)
     const isAway = dayOffset >= awayStart && dayOffset < awayStart + AWAY_TRIP.days
-    const route = generateRoute(rng, distanceKm, isAway ? ROUTE_CENTERS.away : ROUTE_CENTERS.home)
+    const routeCenter = activityRouteCenter(isAway ? ROUTE_CENTERS.away : ROUTE_CENTERS.home, dayOffset)
+    const route = generateRoute(rng, distanceKm, routeCenter)
     const sampleLen = Math.max(20, Math.min(80, Math.round(distanceKm * 4)))
 
     const bestEfforts = {}
@@ -212,6 +221,9 @@ function buildActivities(rng, endDate) {
     }
 
     const gearId = pick(rng, SHOES.filter((s) => !s.retired || rng() < 0.1)).gearId
+    const weatherTempC = round(between(rng, 8, 24), 1)
+    const weatherHumidityPct = Math.round(between(rng, 40, 85))
+    const weatherCode = pick(rng, [0, 1, 2, 3, 61])
 
     activities.push({
       id: String(id++),
@@ -247,7 +259,15 @@ function buildActivities(rng, endDate) {
       cadenceSamples: smoothSeries(rng, sampleLen, 175, 3),
       splits: session.type === 'VO2Max' || session.type === 'Threshold' ? buildSplits(rng, session.type, distanceKm, paceSecPerKm, avgHeartRate) : null,
       gearId,
-      weather: { tempC: round(between(rng, 8, 24), 1), humidityPct: Math.round(between(rng, 40, 85)), code: pick(rng, [0, 1, 2, 3, 61]) },
+      weather: {
+        tempC: weatherTempC,
+        apparentTempC: round(weatherTempC - (weatherHumidityPct % 5) * 0.2, 1),
+        humidityPct: weatherHumidityPct,
+        windKph: round(4 + ((distanceKm * 1.7 + dayOffset) % 18), 1),
+        windDirDeg: (dayOffset * 37 + Math.round(distanceKm * 10)) % 360,
+        precipitationMm: weatherCode === 61 ? round(0.4 + (weatherHumidityPct % 8) * 0.2, 1) : 0,
+        code: weatherCode,
+      },
     })
   }
 

@@ -26,6 +26,7 @@ export const en = {
   brand: {
     namePrefix: 'Run',
     nameSuffix: 'Omics',
+    demoData: 'Demo data',
     // Version number is injected from package.json (see @/lib/version); only the
     // display format lives here so it isn't duplicated across translation files.
     version: (v: string) => `v${v}`,
@@ -43,7 +44,7 @@ export const en = {
     },
   },
   meta: {
-    description: 'Your personal running training dashboard - stats, maps, trends.',
+    description: 'Privacy-first running analytics dashboard built with Next.js and Garmin data.',
   },
 
   theme: {
@@ -130,6 +131,7 @@ export const en = {
       more: 'Frequent',
       noRoutes: 'No routes for this filter',
       mapUnavailable: 'Map unavailable - no map token configured',
+      routePreview: 'Synthetic route preview',
       territory: {
         eyebrow: 'Home base · all-time',
         headline: (percent: number, radius: number) => `${percent}% of all your running sits within a ${radius} km radius.`,
@@ -173,6 +175,10 @@ export const en = {
       appearance: 'Appearance',
       notificationsData: 'Notifications & data',
       account: 'Account',
+    },
+    demo: {
+      title: 'Demo mode',
+      body: 'This deployment uses synthetic running data. Sign-in, notifications and private data controls are intentionally disabled.',
     },
     rowAction: {
       export: 'Export ›',
@@ -953,6 +959,7 @@ export const en = {
       noTraceHint: 'Available after Garmin sync',
       mapUnavailable: 'Map unavailable',
       mapUnavailableHint: 'No map token configured',
+      routePreview: 'Synthetic route preview',
       routeMap: 'Activity route map',
     },
     splits: {

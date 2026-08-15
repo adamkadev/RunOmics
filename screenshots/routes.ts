@@ -23,7 +23,7 @@ export interface RouteSpec {
 // IDs from the generated demo dataset (scripts/generate_demo_data.mjs), so the
 // detail pages prerender with content instead of a 404. Point these at your own
 // data/activities/<YYYY-MM>.json and data/shoes.json when auditing a real deployment.
-const SAMPLE_ACTIVITY_ID = '90000001'
+const SAMPLE_ACTIVITY_ID = '90000256'
 const SAMPLE_SHOE_ID = 'demo-shoe-0000000000000001'
 
 export const ROUTES: RouteSpec[] = [

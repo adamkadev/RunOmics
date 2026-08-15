@@ -1,7 +1,7 @@
 {
   "name": "RunOmics",
   "short_name": "RunOmics",
-  "description": "Your personal running training dashboard - stats, maps, trends.",
+  "description": "Privacy-first running analytics dashboard built with Next.js and Garmin data.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#06091a",

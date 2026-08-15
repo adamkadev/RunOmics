@@ -18,6 +18,7 @@ export const fr = {
   brand: {
     namePrefix: 'Run',
     nameSuffix: 'Omics',
+    demoData: 'Données démo',
     // Version number is injected from package.json (see @/lib/version); only the
     // display format lives here so it isn't duplicated across translation files.
     version: (v: string) => `v${v}`,
@@ -35,7 +36,7 @@ export const fr = {
     },
   },
   meta: {
-    description: 'Votre tableau de bord d’entraînement running personnel - stats, cartes, tendances.',
+    description: 'Tableau de bord d’analyse running respectueux de la vie privée, construit avec Next.js et des données Garmin.',
   },
 
   theme: {
@@ -122,6 +123,7 @@ export const fr = {
       more: 'Fréquent',
       noRoutes: 'Aucun parcours pour ce filtre',
       mapUnavailable: 'Carte indisponible - aucune clé de carte configurée',
+      routePreview: 'Aperçu de parcours synthétiques',
       territory: {
         // Camp de base de toujours, indépendant du sélecteur de zone plus bas -
         // le texte le dit clairement pour ne pas être lu comme la zone choisie.
@@ -167,6 +169,10 @@ export const fr = {
       appearance: 'Apparence',
       notificationsData: 'Notifications & données',
       account: 'Compte',
+    },
+    demo: {
+      title: 'Mode démo',
+      body: 'Ce déploiement utilise des données de course synthétiques. La connexion, les notifications et les contrôles de données privées sont volontairement désactivés.',
     },
     rowAction: {
       export: 'Exporter ›',
@@ -947,6 +953,7 @@ export const fr = {
       noTraceHint: 'Disponible après synchronisation Garmin',
       mapUnavailable: 'Carte indisponible',
       mapUnavailableHint: 'Aucune clé de carte configurée',
+      routePreview: 'Aperçu de parcours synthétique',
       routeMap: 'Carte du parcours de l’activité',
     },
     splits: {
