@@ -26,7 +26,7 @@ export const en = {
   brand: {
     namePrefix: 'Run',
     nameSuffix: 'Omics',
-    demoData: 'Demo data',
+    demoData: 'Demo',
     // Version number is injected from package.json (see @/lib/version); only the
     // display format lives here so it isn't duplicated across translation files.
     version: (v: string) => `v${v}`,
