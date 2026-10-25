@@ -1,16 +1,14 @@
+import { DAY_MS } from '@/lib/calendarDate'
 import type { Activity } from './types'
 import { EFFORTS } from './effort'
+import { isLongSession } from './longRun'
+import { repStats, type RepStats } from './sessionExecution'
+import { creditedEffortSeconds, officialResultsByActivityId, type OfficialRaceResult } from './raceResult'
 
-const DAY_MS = 86_400_000
-
-// A baseline is the athlete's own recent form at this session type: enough runs
-// to average out a bad day, close enough in time to still describe them.
 const BASELINE_LOOKBACK_DAYS = 90
 const BASELINE_RUNS = 5
 const BASELINE_MIN_RUNS = 3
 
-// Below this, "your best since..." is last month's run, which the athlete
-// remembers perfectly well without being told.
 const STANDING_MIN_DAYS = 60
 
 const HARD_ZONE = 4
@@ -19,38 +17,74 @@ export interface TypeBaseline {
   runs: number
   paceSecPerKm: number
   avgHr: number | null
+  measure: 'runs' | 'reps'
 }
 
 export interface EffortStanding {
   label: string
-  /** Days since a run went faster over this distance; null when none ever did. */
   daysSinceBetter: number | null
 }
 
-/**
- * What the athlete's own past says about one run. Every read looks strictly
- * backwards, so a verdict stays true forever: a faster run next month cannot
- * turn today's copy into a lie, and the cached insight never has to be redone.
- */
+export interface PreviousRun {
+  type: Activity['type']
+  description: string
+  daysAgo: number
+}
+
+/** Rep for rep: a threshold block progresses session to session, which an average of the last five blurs. */
+export interface PreviousSession extends RepStats {
+  daysAgo: number
+}
+
+/** Races are left out: a half marathon raced in May is no long run to measure an easy Sunday against. */
+export interface LongestRun {
+  km: number
+  daysAgo: number
+  daysSinceAsLong: number | null
+}
+
 export interface RunHistory {
   baseline: TypeBaseline | null
   standing: EffortStanding | null
-  /** Minutes spent in zone 4 or 5 - the part of the session that was actually hard. */
   hardMinutes: number | null
   runsInPast7Days: number
   daysSinceLastRun: number | null
+  previous: PreviousRun | null
+  previousSession: PreviousSession | null
+  longest: LongestRun | null
 }
 
 function dayNumber(date: string): number {
   return Math.floor(new Date(date.slice(0, 10) + 'T00:00:00Z').getTime() / DAY_MS)
 }
 
-function typeBaseline(activity: Activity, before: Activity[], day: number): TypeBaseline | null {
-  const peers = before
-    .filter(
-      (a) => a.type === activity.type && a.distanceKm > 0 && day - dayNumber(a.date) <= BASELINE_LOOKBACK_DAYS
-    )
+/** A 7-minute threshold rep compares from one session to the next; a 400 m and a 1 km VO2max rep do not. */
+const REP_BASELINE_TYPES: ReadonlySet<Activity['type']> = new Set(['Tempo', 'Threshold'])
+
+function recentPeers(activity: Activity, before: Activity[], day: number, alike: (a: Activity) => boolean): Activity[] {
+  return before
+    .filter((a) => a.type === activity.type && a.distanceKm > 0 && day - dayNumber(a.date) <= BASELINE_LOOKBACK_DAYS && alike(a))
     .slice(0, BASELINE_RUNS)
+}
+
+/** Threshold reps, not whole-run averages the warm-up and recoveries dilute; no average for a race, whose peers are other distances. */
+function typeBaseline(activity: Activity, before: Activity[], day: number): TypeBaseline | null {
+  if (activity.type === 'Race') return null
+
+  if (REP_BASELINE_TYPES.has(activity.type) && repStats(activity)) {
+    const reps = recentPeers(activity, before, day, (a) => repStats(a) !== null).map((a) => repStats(a)!)
+    if (reps.length < BASELINE_MIN_RUNS) return null
+    const heartRates = reps.map((r) => r.avgHr).filter((hr): hr is number => hr !== null)
+    return {
+      runs: reps.length,
+      paceSecPerKm: Math.round(reps.reduce((sum, r) => sum + r.paceSecPerKm, 0) / reps.length),
+      avgHr: heartRates.length ? Math.round(heartRates.reduce((sum, hr) => sum + hr, 0) / heartRates.length) : null,
+      measure: 'reps',
+    }
+  }
+
+  const long = isLongSession(activity)
+  const peers = recentPeers(activity, before, day, (a) => activity.type !== 'Base' || isLongSession(a) === long)
   if (peers.length < BASELINE_MIN_RUNS) return null
 
   const seconds = peers.reduce((sum, a) => sum + a.durationSeconds, 0)
@@ -61,24 +95,47 @@ function typeBaseline(activity: Activity, before: Activity[], day: number): Type
     runs: peers.length,
     paceSecPerKm: Math.round(seconds / km),
     avgHr: heartRates.length ? Math.round(heartRates.reduce((sum, hr) => sum + hr, 0) / heartRates.length) : null,
+    measure: 'runs',
+  }
+}
+
+const SESSION_TYPES: ReadonlySet<Activity['type']> = new Set(['Tempo', 'Threshold', 'VO2Max', 'Anaerobic', 'Sprint'])
+
+function previousSession(activity: Activity, before: Activity[], day: number): PreviousSession | null {
+  if (!SESSION_TYPES.has(activity.type) || !repStats(activity)) return null
+  const last = recentPeers(activity, before, day, (a) => repStats(a) !== null)[0]
+  return last ? { ...repStats(last)!, daysAgo: day - dayNumber(last.date) } : null
+}
+
+function longestRun(activity: Activity, before: Activity[], day: number): LongestRun | null {
+  const runs = before.filter((a) => a.type !== 'Race')
+  const recent = runs.filter((a) => day - dayNumber(a.date) <= BASELINE_LOOKBACK_DAYS && a.distanceKm > 0)
+  const longest = recent.reduce<Activity | null>((max, a) => (!max || a.distanceKm > max.distanceKm ? a : max), null)
+  if (!longest) return null
+  const asLong = runs.find((a) => a.distanceKm >= activity.distanceKm)
+  return {
+    km: Math.round(longest.distanceKm * 10) / 10,
+    daysAgo: day - dayNumber(longest.date),
+    daysSinceAsLong: asLong ? day - dayNumber(asLong.date) : null,
   }
 }
 
 const ALL_TIME = Number.MAX_SAFE_INTEGER
 
-function effortStanding(activity: Activity, before: Activity[], day: number): EffortStanding | null {
-  // Longest distance first, so a stable sort keeps the 10K story ahead of the
-  // 1K one that is buried inside it.
+function effortStanding(
+  activity: Activity,
+  before: Activity[],
+  day: number,
+  official: Map<string, OfficialRaceResult>,
+): EffortStanding | null {
   const candidates = [...EFFORTS]
     .reverse()
-    .flatMap(({ key, label }) => {
-      const seconds = activity.bestEfforts?.[key]
+    .flatMap(({ key, label, km }) => {
+      const seconds = creditedEffortSeconds(activity, key, km, official)
       if (seconds == null) return []
-      // Nothing to stand against: the first ever run over that distance is a
-      // fact about the dataset, not about the athlete.
-      if (!before.some((a) => a.bestEfforts?.[key] != null)) return []
+      if (!before.some((a) => creditedEffortSeconds(a, key, km, official) != null)) return []
 
-      const better = before.find((a) => (a.bestEfforts?.[key] ?? Infinity) < seconds)
+      const better = before.find((a) => (creditedEffortSeconds(a, key, km, official) ?? Infinity) < seconds)
       const daysSinceBetter = better ? day - dayNumber(better.date) : null
       if (daysSinceBetter !== null && daysSinceBetter < STANDING_MIN_DAYS) return []
       return [{ label, daysSinceBetter }]
@@ -94,8 +151,9 @@ function hardMinutes(activity: Activity): number | null {
   return Math.round(seconds / 60)
 }
 
-export function runHistory(activity: Activity, activities: Activity[]): RunHistory {
+export function runHistory(activity: Activity, activities: Activity[], officialResults: OfficialRaceResult[] = []): RunHistory {
   const day = dayNumber(activity.date)
+  const official = officialResultsByActivityId(officialResults)
   const before = activities
     .filter((a) => a.id !== activity.id && dayNumber(a.date) <= day)
     .sort((a, b) => b.date.localeCompare(a.date))
@@ -103,9 +161,12 @@ export function runHistory(activity: Activity, activities: Activity[]): RunHisto
 
   return {
     baseline: typeBaseline(activity, before, day),
-    standing: effortStanding(activity, before, day),
+    standing: effortStanding(activity, before, day, official),
     hardMinutes: hardMinutes(activity),
     runsInPast7Days: before.filter((a) => day - dayNumber(a.date) < 7).length + 1,
     daysSinceLastRun: last ? day - dayNumber(last.date) : null,
+    previous: last ? { type: last.type, description: last.description ?? '', daysAgo: day - dayNumber(last.date) } : null,
+    previousSession: previousSession(activity, before, day),
+    longest: longestRun(activity, before, day),
   }
 }

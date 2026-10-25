@@ -1,30 +1,18 @@
-"""Sync Garmin's VO2max reference table to public/data/vo2max_norms.json.
-
-Garmin serves the Cooper Institute age/sex percentile anchors as a static JSON
-table. It is the source of truth for the athlete rank badge and the "top X%"
-band in the UI, so rather than keeping a hand-copied duplicate in TypeScript we
-pull it on every sync and report when Garmin changes it.
-
-The API shape is a list of open-ended bands per bracket:
+"""Garmin serves the Cooper Institute table as open-ended bands whose `min` is the lower anchor:
 
     {"MALE": {"20-29": [{"category": "Superior", "min": "55.4", "max": ""}, ...]}}
-
-Each band's `min` is its lower anchor, so the four thresholds we need are just
-the `min` of Superior/Excellent/Good/Fair. We flatten to the shape the domain
-layer consumes:
-
-    {"male": {"20-29": {"superior": 55.4, "excellent": 51.1, ...}}}
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
+from data_directory import get_data_dir
+from repository.atomic_write import write_text_atomic
 from .client import GarminAPIError, GarminClient
 
-_OUT_PATH = Path(__file__).parent.parent.parent / "public" / "data" / "vo2max_norms.json"
+_OUT_PATH = get_data_dir() / "vo2max_norms.json"
 
 _SEXES = {"MALE": "male", "FEMALE": "female"}
 _BRACKETS = ("20-29", "30-39", "40-49", "50-59", "60-69", "70-79")
@@ -36,11 +24,7 @@ class Vo2maxNormsError(Exception):
 
 
 def fetch_vo2max_norms(client: GarminClient) -> dict[str, Any] | None:
-    """Return the normalized norms table, or None if it could not be fetched.
-
-    A failure here must never abort a sync: the committed JSON stays valid
-    reference data indefinitely, so we degrade to "keep what we have".
-    """
+    """A failure here must never abort a sync: the committed JSON stays valid reference data indefinitely."""
     print("Syncing VO2max norms…")
     try:
         raw = client.get_vo2max_norms()
@@ -92,23 +76,22 @@ def normalize_vo2max_norms(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_vo2max_norms(norms: dict[str, Any] | None) -> bool:
-    """Write the norms table, returning True when the values actually changed."""
     if norms is None:
         return False
 
     existing: dict[str, Any] | None = None
     if _OUT_PATH.exists():
         try:
-            existing = json.loads(_OUT_PATH.read_text())
-        except Exception:
-            existing = None
+            existing = json.loads(_OUT_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # Garmin serves the whole table every time, so rewriting it loses nothing.
+            print(f"  Warning: {_OUT_PATH} could not be read ({exc}); rewriting it from Garmin's table.")
 
     if existing == norms:
         print("  VO2max norms unchanged.")
         return False
 
-    _OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _OUT_PATH.write_text(json.dumps(norms, indent=2, sort_keys=True) + "\n")
+    write_text_atomic(_OUT_PATH, json.dumps(norms, indent=2, sort_keys=True) + "\n")
 
     if existing is None:
         print("  VO2max norms written to vo2max_norms.json")

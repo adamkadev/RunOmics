@@ -1,4 +1,4 @@
-"""Sync Garmin's own VO2max series to public/data/vo2max_history.json.
+"""Sync Garmin's own VO2max series to the private data workspace.
 
   metrics-service/metrics/maxmet/monthly/{start}/{end}
   metrics-service/metrics/maxmet/daily/{start}/{end}
@@ -17,19 +17,25 @@ serving once it ages out of its retention window stays in ours.
 The monthly series feeds the six-month and one-year views; the daily one, kept
 to a recent window, feeds the four-week view. The daily endpoint is
 undocumented, so a failure there is a warning, not a failed sync.
+
+Without a Connect session - no GARMIN_SECRET, a garth token past saving, or a
+quick sync - sync_vo2max_from_runs carries both series on from the runs themselves: each
+FIT file's own VO2max reading (message 140), within 0.1 of Connect's daily
+value.
 """
 
 from __future__ import annotations
 
-import json
+from collections.abc import Iterable
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any
 
+from data_directory import get_data_dir
 from .client import GarminAPIError, GarminClient
 from .retry import retry_transient
+from repository.history_file import read_history, write_history
 
-_OUT_PATH = Path(__file__).parent.parent.parent / "public" / "data" / "vo2max_history.json"
+_OUT_PATH = get_data_dir() / "vo2max_history.json"
 
 _WINDOW_MONTHS = 12
 # Only the four-week view plots daily samples, so nothing older is worth a request.
@@ -89,13 +95,8 @@ def normalize_max_met(entries: Any) -> dict[str, dict[str, Any]]:
     return samples
 
 
-def _load_stored() -> dict[str, dict[str, Any]]:
-    if not _OUT_PATH.exists():
-        return {}
-    try:
-        return json.loads(_OUT_PATH.read_text())
-    except Exception:
-        return {}
+def _load_stored() -> dict[str, Any]:
+    return read_history(_OUT_PATH)
 
 
 def _fetch_months(client: GarminClient, start: date, today: date) -> dict[str, dict[str, Any]]:
@@ -104,9 +105,7 @@ def _fetch_months(client: GarminClient, start: date, today: date) -> dict[str, d
     for window_start, window_end in monthly_windows(start, today):
         try:
             payload = retry_transient(
-                lambda: client.get_max_met_monthly(
-                    window_start.isoformat(), window_end.isoformat()
-                )
+                client.get_max_met_monthly, window_start.isoformat(), window_end.isoformat()
             )
         except GarminAPIError as exc:
             print(f"  Warning: VO2max {window_start:%Y-%m}…{window_end:%Y-%m} failed: {exc}")
@@ -140,7 +139,12 @@ def sync_vo2max_history(client: GarminClient, start: date, today: date | None = 
     today = today or date.today()
     print("Syncing VO2max history…")
 
-    stored = _load_stored()
+    # Connect's series replaces whatever was carried on from the runs while
+    # it was away.
+    stored = {
+        name: {key: sample for key, sample in (series or {}).items() if sample.get("source") != _CARRIED}
+        for name, series in _load_stored().items()
+    }
     months = {**(stored.get("months") or {}), **_fetch_months(client, start, today)}
     days = {**(stored.get("days") or {}), **_fetch_days(client, today)}
 
@@ -148,14 +152,7 @@ def sync_vo2max_history(client: GarminClient, start: date, today: date | None = 
         print("  No VO2max samples returned.")
         return 0
 
-    _OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _OUT_PATH.write_text(
-        json.dumps(
-            {"months": dict(sorted(months.items())), "days": dict(sorted(days.items()))},
-            indent=2,
-        )
-        + "\n"
-    )
+    write_history(_OUT_PATH, {"months": dict(sorted(months.items())), "days": dict(sorted(days.items()))})
 
     latest = months[max(months)]
     print(
@@ -163,3 +160,77 @@ def sync_vo2max_history(client: GarminClient, start: date, today: date | None = 
         f"latest {latest['vo2max']} ml/kg/min."
     )
     return len(months)
+
+
+# Marks a sample carried on from a run's FIT file, so Connect's own samples
+# can be told apart: they set where carrying starts, and replace every carried
+# one the next time Connect answers.
+_CARRIED = "fit"
+
+
+def _is_run(activity: dict[str, Any]) -> bool:
+    """Running of any kind (trail, track, treadmill); a record from before the
+    sport was stored came from the running-only sync."""
+    sport = activity.get("sport")
+    return sport is None or "running" in str(sport)
+
+
+def _run_order(activity: dict[str, Any]) -> tuple[str, int]:
+    # Stored dates carry no time; Garmin's ids grow, so the later of two runs
+    # on a day has the larger one.
+    activity_id = str(activity.get("id") or "")
+    return str(activity.get("date") or "")[:10], int(activity_id) if activity_id.isdigit() else 0
+
+
+def samples_from_runs(activities: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Each day's last FIT VO2max reading among the runs, keyed by date."""
+    days: dict[str, dict[str, Any]] = {}
+    for activity in sorted((a for a in activities if _is_run(a)), key=_run_order):
+        day = _run_order(activity)[0]
+        value = activity.get("vo2maxGarmin")
+        if day and isinstance(value, (int, float)) and value > 0:
+            days[day] = {"date": day, "vo2max": round(value, 1), "source": _CARRIED}
+    return days
+
+
+def sync_vo2max_from_runs(activities: Iterable[dict[str, Any]], today: date | None = None) -> int:
+    """Carry the stored series on from the runs' readings; returns the month count.
+
+    Connect's series stands up to its last own sample: on the days before it,
+    Connect was answering, and a run it left unsampled had not moved VO2max.
+    Every run after it is carried - its day, and its month (keeping the
+    month's fitness age, which only Connect knows).
+    """
+    today = today or date.today()
+    stored = _load_stored()
+    months: dict[str, Any] = dict(stored.get("months") or {})
+    days: dict[str, Any] = dict(stored.get("days") or {})
+    connects = [s for s in (*months.values(), *days.values()) if isinstance(s, dict) and s.get("source") != _CARRIED]
+    last_connect = max((str(s.get("date") or "") for s in connects), default="")
+    since = (today - timedelta(days=_DAILY_WINDOW_DAYS)).isoformat()
+
+    carried = 0
+    for day, sample in samples_from_runs(activities).items():
+        if day <= last_connect:
+            continue
+        month = months.get(day[:7]) or {}
+        months[day[:7]] = {**sample, **({"fitnessAge": month["fitnessAge"]} if "fitnessAge" in month else {})}
+        if day >= since:
+            days[day] = sample
+        carried += 1
+
+    if carried:
+        write_history(_OUT_PATH, {"months": dict(sorted(months.items())), "days": dict(sorted(days.items()))})
+    print(f"VO2max carried on from {carried} run day(s) after Connect's last sample.")
+    return len(months)
+
+
+def newest_carried_vo2max() -> float | None:
+    """The newest VO2max in the stored series when a run's FIT reading holds
+    it - None when Connect's own sample is the newest, which stays as it is."""
+    stored = _load_stored()
+    samples = [s for s in (*(stored.get("months") or {}).values(), *(stored.get("days") or {}).values()) if isinstance(s, dict)]
+    if not samples:
+        return None
+    newest = max(samples, key=lambda s: (str(s.get("date") or ""), s.get("source") != _CARRIED))
+    return newest.get("vo2max") if newest.get("source") == _CARRIED else None

@@ -1,37 +1,45 @@
-import type { Activity } from '@/domain/activity/types'
-import { runVerdictTone } from '@/domain/activity/runVerdict'
-import { GlassSurface } from '@/components/ui/GlassSurface'
-import { STATUS } from '@/lib/statusColors'
+import type { ActivityDetailView } from './activityViews'
+import { runVerdictTone, type VerdictTone as RunTone } from '@/domain/activity/runVerdict'
+import { cardClass } from '@/components/ui/Card'
+import { VerdictBlock, type VerdictTone } from '@/components/ui/Verdict'
+import type { ReactNode } from 'react'
 import type { Insight } from '@/lib/gemini'
-import { cn } from '@/lib/utils'
 import { t } from '@/i18n'
 
-const TONE_TEXT_CLASS = {
-  positive: STATUS.success.text,
-  neutral: 'text-foreground',
-  caution: STATUS.warning.text,
-} as const
-
 interface Props {
-  activity: Activity
-  /** Generated copy for the same tone; falls back to the rules-based copy when absent. */
+  activity: ActivityDetailView
   aiVerdict: Insight | null
+  children?: ReactNode
 }
 
-export function RunVerdict({ activity, aiVerdict }: Props) {
+export const RUN_CHIP_CLASS =
+  'hit-44 inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full bg-[var(--fill-3)] px-3 py-1 text-[13px] text-foreground'
+
+const STATUS_TONE: Record<RunTone, VerdictTone> = {
+  positive: 'accent',
+  neutral: 'accent',
+  caution: 'warn',
+}
+
+export function RunVerdict({ activity, aiVerdict, children }: Props) {
   const v = t.activity.verdict
   const tone = runVerdictTone(activity)
-
-  const headline = aiVerdict?.headline ?? v.headline[tone](t.activityTypes[activity.type])
-  const body =
-    aiVerdict?.body ??
-    (activity.rpe !== null ? v.effortClause(t.rpeLabels[activity.rpe] ?? '', activity.rpe) : null)
+  const session = v.headline[tone](t.activityTypes[activity.type])
+  const eyebrow = `${v.eyebrow[tone]} · ${session}`
 
   return (
-    <GlassSurface variant="card" className="p-5 text-center">
-      <p className="widget-label text-accent-text">{v.title}</p>
-      <h2 className={cn('mt-1 font-display text-lg font-bold leading-snug', TONE_TEXT_CLASS[tone])}>{headline}</h2>
-      {body && <p className="mt-1 text-sm leading-snug text-muted-foreground">{body}</p>}
-    </GlassSurface>
+    <section className={cardClass({ className: 'flex flex-col gap-3' })} data-testid="run-verdict">
+      <VerdictBlock
+        tone={STATUS_TONE[tone]}
+        eyebrow={eyebrow}
+        headline={aiVerdict?.headline ?? null}
+        body={aiVerdict?.body ? <span data-testid="run-verdict-body">{aiVerdict.body}</span> : undefined}
+      />
+      {children && (
+        <div className="flex flex-wrap gap-2" data-testid="run-chips">
+          {children}
+        </div>
+      )}
+    </section>
   )
 }

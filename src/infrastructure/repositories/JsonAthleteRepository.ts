@@ -1,5 +1,33 @@
-import fs from 'fs'
 import { dataPath } from '../dataPath'
+import { readJsonFile } from '../readJsonFile'
+
+export interface RunningInjury {
+  /** Free text, e.g. 'left achilles' - the site is what recurs, not a code. */
+  site: string
+  year: number
+  weeksOut?: number
+  recurrent?: boolean
+  resolved?: boolean
+  /** The day it was first noted, YYYY-MM-DD. */
+  date?: string
+  note?: string
+}
+
+/** `reviewedOn` tells "no injuries" from "never asked", and prior injury is the best-replicated predictor of the next. */
+export interface InjuryHistory {
+  reviewedOn: string
+  injuries: RunningInjury[]
+}
+
+export type TrainingBreakReason = 'injury' | 'illness' | 'heat' | 'travel' | 'personal'
+
+/** Typed into athlete.json: without it a coach reads a gap as lost fitness rather than a life event. */
+export interface TrainingBreak {
+  start: string
+  end: string
+  reason: TrainingBreakReason
+  note?: string
+}
 
 export interface AthleteProfile {
   lthrBpm?: number
@@ -14,24 +42,23 @@ export interface AthleteProfile {
   restingHrBpm?: number
   age?: number
   sex?: 'male' | 'female'
-  /** Garmin's fitness age, and the floor it says the current training can reach. */
   fitnessAgeYrs?: number
   achievableFitnessAgeYrs?: number
   bmi?: number
-  /** Primary training device the Garmin metrics above are measured by. */
+  fitnessAgeLastUpdated?: string
+  bmiMeasurementDate?: string
   deviceId?: number
   deviceName?: string
   deviceFirmware?: string
-  /** ISO date the device was registered on Garmin Connect. */
   deviceSince?: string
   lastUpdate?: string
+  injuryHistory?: InjuryHistory
+  trainingBreaks?: TrainingBreak[]
 }
 
 export function getAthleteProfile(): AthleteProfile {
-  const filePath = dataPath('athlete.json')
-  if (!fs.existsSync(filePath)) return {}
+  const raw = readJsonFile<Record<string, unknown>>(dataPath('athlete.json'), {})
 
-  const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>
   const profile: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw)) {
     if (value !== null && value !== undefined) profile[key] = value

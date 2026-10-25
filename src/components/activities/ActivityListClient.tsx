@@ -1,446 +1,557 @@
 'use client'
 
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import Link from 'next/link'
-import { Search, SearchX, ChevronDown } from 'lucide-react'
-import { ActivityListCard } from './ActivityListCard'
-import { ACTIVITY_TYPE_CONFIG } from '@/domain/activity/types'
+import { startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import dynamic from 'next/dynamic'
+import { Search, SearchX, SlidersHorizontal, X } from 'lucide-react'
+import { ActivityThumbRow } from './ActivityThumbRow'
+import { ActivityFilterSheet } from './ActivityFilterSheet'
+import {
+  ALL_RUNS,
+  GROUP_IDS,
+  checkedTypes,
+  countByType,
+  filterTypes,
+  normalizeTypes,
+  parseFilter,
+  parseSort,
+  sortQuery,
+  typesLabel,
+  type ActivityFilter,
+} from './activityFilter'
 import type { ActivitySummary, ActivityType } from '@/domain/activity/types'
-import type { ActivityQueryResult, ActivitySortKey, ActivitySortOrder } from '@/application/usecases/QueryActivities'
+import { queryRuns, type ActivityQueryKind } from '@/domain/activity/activityQuery'
 import type { QualifiedEffort } from '@/application/usecases/GetRecords'
-import { GlassSurface } from '@/components/ui/GlassSurface'
+import type { ExploreAreaRef } from '@/domain/explore/types'
+import type { ExplorePlan } from '@/components/explore/routeGenerator'
+import { cardClass } from '@/components/ui/Card'
 import { Pill } from '@/components/ui/Pill'
-import { SortDropdown } from '@/components/ui/SortDropdown'
-import { easyHardShare } from '@/domain/training/easyHard'
-import { weekRangeLabel } from '@/lib/formatters'
+import { SegmentedTabs, useSegmentedTabs } from '@/components/ui/SegmentedTabs'
+import { easyShare } from '@/domain/activity/easyShare'
+import { groupByWeek, type WeekGroup } from '@/domain/activity/weekGroups'
+
+import { formatDate, formatDateRange, formatKm, formatRanKm } from '@/lib/formatters'
+import { useUrlParam } from '@/lib/useUrlParam'
+import { isPopNavigation } from '@/lib/popNavigation'
 import { isoDate, addDays, startOfWeek } from '@/lib/calendarDate'
-import { cn } from '@/lib/utils'
+import { useToday } from '@/lib/useToday'
 import { t } from '@/i18n'
 
-const ALL_TYPES = Object.keys(ACTIVITY_TYPE_CONFIG) as ActivityType[]
-const PAGE_SIZE = 20
-const SEARCH_DEBOUNCE_MS = 300
-const ACTIVE_CHIP_SHADOW = 'shadow-[0_4px_12px_-4px_var(--ring)]'
+// The map and its tiles load only once the Map tab is opened.
+const GlobalMapWrapper = dynamic(() => import('@/components/map/GlobalMapWrapper').then((m) => m.GlobalMapWrapper), { ssr: false })
 
-const SORT_OPTIONS: { value: ActivitySortKey; label: string }[] = [
-  { value: 'date', label: t.activities.sort.date },
-  { value: 'distance', label: t.activities.sort.distance },
-  { value: 'duration', label: t.activities.sort.duration },
-  { value: 'pace', label: t.activities.sort.pace },
-  { value: 'avgHr', label: t.activities.sort.avgHr },
-]
+export type ActivitiesView = 'list' | 'map'
+const VIEWS = ['list', 'map'] as const
 
-interface WeekGroup {
-  key: string
-  label: string
-  /** Always the "Jul 6 - 12" range, shown as a subtitle even under "This week". */
-  range: string
-  items: ActivitySummary[]
-  totalKm: number
-  easyPct: number | null
-  hardPct: number | null
+export function activitiesView(param: string | null): ActivitiesView {
+  return param === 'map' ? 'map' : 'list'
 }
 
-function WeekStat({ value, label }: { value: string; label: string }) {
+const SEARCH_DEBOUNCE_MS = 300
+
+interface WeekRow extends WeekGroup<ActivitySummary> {
+  label: string
+  easyPct: number | null
+}
+
+const KM_STRONG = 'font-semibold text-foreground'
+
+/** Under a filter the easy share is dropped: "88% easy" of the threshold runs alone says nothing about the week. */
+function PastWeekLine({ group, showEasy, weekTotal }: { group: WeekRow; showEasy: boolean; weekTotal: number | null }) {
+  const w = t.activities.weekLine
+  if (weekTotal !== null) {
+    return (
+      <span className="min-w-0 text-right text-[13px] text-muted-foreground text-pretty" data-testid="past-week-line">
+        {w.ofRuns(group.items.length, weekTotal)}
+      </span>
+    )
+  }
   return (
-    <div className="text-center">
-      <div className="text-sm font-bold tabular-nums text-foreground">{value}</div>
-      <div className="text-micro uppercase tracking-wide text-subtle">{label}</div>
+    // The line wraps on a narrow phone so the week's dates never do.
+    <span className="min-w-0 text-right text-footnote text-muted-foreground text-pretty" data-testid="past-week-line">
+      <span className={KM_STRONG}>{formatKm(group.totalKm)}</span> {t.units.km} · {w.runs(group.items.length)}
+      {showEasy && group.easyPct !== null && ` · ${w.easy(group.easyPct)}`}
+    </span>
+  )
+}
+
+/** This week and about three months: a screen and a half on a phone, and what most visits read. */
+const FIRST_BLOCKS = 4
+const MORE_BLOCKS = 6
+const SHOWN_BLOCKS_KEY = 'activities-shown-blocks'
+
+/** Read only on Back, which never hydrates: the server render has no sessionStorage. */
+function savedShownBlocks(): number {
+  try {
+    const saved = Number(sessionStorage.getItem(SHOWN_BLOCKS_KEY))
+    return saved > FIRST_BLOCKS ? saved : FIRST_BLOCKS
+  } catch {
+    return FIRST_BLOCKS
+  }
+}
+
+const WEEK_HEADER_PX = 42
+/** An inset row's min-h-16. */
+const ROW_PX = 64
+/** A sorted list has no months: it grows by about a month's runs per block. */
+const ROWS_PER_BLOCK = 12
+
+function InsetRows({ items, efforts, types }: { items: ActivitySummary[]; efforts: Record<string, QualifiedEffort[]>; types: Record<string, ActivityType> }) {
+  return (
+    <div className="inset-group flex flex-col">
+      {items.map((a) => (
+        <ActivityThumbRow key={a.id} activity={a} qualifiedEfforts={efforts[a.id]} type={types[a.id]} variant="inset" />
+      ))}
     </div>
   )
 }
 
-// Groups are built from an already date-sorted list, so same-week items are
-// always contiguous - a single linear pass is enough (B3). Weeks are Monday-
-// Sunday, matching the Plan page's week convention.
-function groupByWeek(items: ActivitySummary[]): WeekGroup[] {
-  const raw: { key: string; items: ActivitySummary[] }[] = []
-  for (const a of items) {
-    const key = isoDate(startOfWeek(new Date(a.date + 'T00:00:00')))
-    const last = raw[raw.length - 1]
-    if (last && last.key === key) {
-      last.items.push(a)
+function weekRows(groups: WeekGroup<ActivitySummary>[], currentWeekStart: string): WeekRow[] {
+  return groups.map((group) => {
+    // No year: the month heading above has one.
+    const range = formatDateRange(group.key, isoDate(addDays(new Date(group.key + 'T00:00:00'), 6)), { year: 'never' })
+    return {
+      ...group,
+      label: group.key === currentWeekStart ? t.activities.thisWeek : range,
+      easyPct: easyShare(group.items)?.easy ?? null,
+    }
+  })
+}
+
+type ListBlock =
+  | { kind: 'current'; week: WeekRow }
+  | { kind: 'month'; key: string; label: string; km: number; runs: number; weeks: WeekRow[] }
+
+/** A month heading totals the weeks under it, so its km is the sum of the cards it heads. */
+function listBlocks(weeks: WeekRow[]): ListBlock[] {
+  const blocks: ListBlock[] = []
+  for (const week of weeks) {
+    if (week.isCurrent) {
+      blocks.push({ kind: 'current', week })
+      continue
+    }
+    const key = week.key.slice(0, 7)
+    const open = blocks[blocks.length - 1]
+    if (open?.kind === 'month' && open.key === key) {
+      open.weeks.push(week)
+      open.km += week.totalKm
+      open.runs += week.items.length
     } else {
-      raw.push({ key, items: [a] })
+      const label = formatDate(`${key}-01`, { precision: 'month', year: 'always', style: 'full' })
+      blocks.push({ kind: 'month', key, label, km: week.totalKm, runs: week.items.length, weeks: [week] })
     }
   }
-
-  const currentWeekStart = isoDate(startOfWeek(new Date()))
-
-  return raw.map(({ key, items: weekItems }) => {
-    const totalKm = weekItems.reduce((s, a) => s + a.distanceKm, 0)
-    // Same source as Today and Plan (time in HR zones 1-2 vs 3+) so the E/H
-    // ratio can't diverge between screens.
-    const { hardPct } = easyHardShare(weekItems)
-    // Derive easy from the rounded hard so the two always sum to 100 and match
-    // Today's "N% hard".
-    const hard = hardPct === null ? null : Math.round(hardPct)
-    const range = weekRangeLabel(key, isoDate(addDays(new Date(key + 'T00:00:00'), 6)))
-    const label = key === currentWeekStart ? t.activities.thisWeek : range
-    return {
-      key,
-      label,
-      range,
-      items: weekItems,
-      totalKm,
-      easyPct: hard === null ? null : 100 - hard,
-      hardPct: hard,
-    }
-  })
+  return blocks
 }
 
-// PageTransition (src/components/layout/PageTransition.tsx) keys the route
-// subtree by pathname, so this component fully unmounts when navigating to an
-// activity's detail page and remounts fresh on the way back. sessionStorage
-// (cleared per-tab, mirrors AppShell's scroll-position cache) survives that
-// remount so filters/sort/expanded weeks aren't lost on back navigation.
-const FILTERS_STORAGE_KEY = 'activities:filters'
+// The search survives a visit to a run and back; the filter and the sort
+// live in the URL (?group=, ?types=, ?sort=).
+const SEARCH_STORAGE_KEY = 'activities:search'
 
-interface StoredFilters {
-  search: string
-  selectedType: ActivityType | null
-  sortBy: ActivitySortKey
-  sortOrder: ActivitySortOrder
-  expandedWeeks: string[]
-}
-
-function readStoredFilters(): StoredFilters | null {
-  if (typeof window === 'undefined') return null
+function readStoredSearch(): string {
+  if (typeof window === 'undefined') return ''
   try {
-    const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<StoredFilters>
-    return {
-      search: typeof parsed.search === 'string' ? parsed.search : '',
-      selectedType: ALL_TYPES.includes(parsed.selectedType as ActivityType) ? (parsed.selectedType as ActivityType) : null,
-      sortBy: SORT_OPTIONS.some((o) => o.value === parsed.sortBy) ? (parsed.sortBy as ActivitySortKey) : 'date',
-      sortOrder: parsed.sortOrder === 'asc' || parsed.sortOrder === 'desc' ? parsed.sortOrder : 'desc',
-      expandedWeeks: Array.isArray(parsed.expandedWeeks) ? parsed.expandedWeeks.filter((k) => typeof k === 'string') : [],
-    }
+    return sessionStorage.getItem(SEARCH_STORAGE_KEY) ?? ''
   } catch {
-    return null
+    return ''
   }
-}
-
-async function fetchActivities(params: {
-  type: ActivityType | null
-  search: string
-  sortBy: ActivitySortKey
-  sortOrder: ActivitySortOrder
-  offset: number
-}): Promise<ActivityQueryResult> {
-  const qs = new URLSearchParams({
-    sortBy: params.sortBy,
-    sortOrder: params.sortOrder,
-    offset: String(params.offset),
-    limit: String(PAGE_SIZE),
-  })
-  if (params.type) qs.set('type', params.type)
-  if (params.search.trim()) qs.set('search', params.search.trim())
-
-  const res = await fetch(`/api/activities?${qs}`)
-  return res.json()
 }
 
 interface Props {
+  /** The whole archive: filters, search and sort run on it here. */
   initialItems: ActivitySummary[]
-  initialNextOffset: number | null
   totalCount: number
   qualifiedEffortsByActivityId?: Record<string, QualifiedEffort[]>
+  /** The date the page was prerendered on; see useToday. */
+  today: string
+  /** By gear id. */
+  shoeNames?: Record<string, string>
+  /** The map's data version and the cluster it opens on: the map's data is fetched only once the map is opened. */
+  map: { version: string; clusterId: string | null }
+  exploreAreas?: ExploreAreaRef[]
+  explorePlans?: ExplorePlan[]
+  /** Unit id → the day it passed 90 %. */
+  exploreCompletedSince?: Record<string, string>
+  /** Session types that override the watch's, by activity id. */
+  sessionTypes?: Record<string, ActivityType>
 }
 
 export function ActivityListClient({
   initialItems,
-  initialNextOffset,
   totalCount,
   qualifiedEffortsByActivityId = {},
+  today: serverToday,
+  shoeNames = {},
+  map,
+  exploreAreas,
+  explorePlans,
+  exploreCompletedSince,
+  sessionTypes = {},
 }: Props) {
+  const today = useToday(serverToday)
+  // In the URL so /map can open on the map.
+  const [viewParam, setViewParam] = useUrlParam('view')
+  const view = activitiesView(viewParam)
+  const viewTabs = useSegmentedTabs({ ids: VIEWS, value: view, onChange: (next) => setViewParam(next === 'map' ? 'map' : null) })
   const [search, setSearch] = useState('')
-  const [selectedType, setSelectedType] = useState<ActivityType | null>(null)
-  const [sortBy, setSortBy] = useState<ActivitySortKey>('date')
-  const [sortOrder, setSortOrder] = useState<ActivitySortOrder>('desc')
+  const [gearId, setGearId] = useUrlParam('shoe')
+  const [groupParam, setGroupParam] = useUrlParam('group')
+  const [typesParam, setTypesParam] = useUrlParam('types')
+  const [sortParam, setSortParam] = useUrlParam('sort')
+  const filter = useMemo(() => parseFilter(groupParam, typesParam), [groupParam, typesParam])
+  const sort = parseSort(sortParam)
+  const [sheetOpen, setSheetOpen] = useState(false)
 
-  const [items, setItems] = useState(initialItems)
-  const [nextOffset, setNextOffset] = useState(initialNextOffset)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [isPending, setIsPending] = useState(false)
-  // Past weeks start collapsed - only the first (most recent) week group reads
-  // as a training block by default; older weeks are a tap away.
-  const [expandedWeeks, setExpandedWeeks] = useState<Set<string>>(new Set())
+  const setFilter = useCallback(
+    (next: ActivityFilter) => {
+      setTypesParam(next.types.length > 0 ? next.types.join(',') : null)
+      setGroupParam(next.group === 'all' ? null : next.group)
+    },
+    [setGroupParam, setTypesParam],
+  )
 
-  // Debounce the search box before it hits the query (server round-trip).
+
+  // Derived from the unfiltered set the page handed us, so the header and
+  // the sheet's counts keep describing the archive rather than the filter.
+  const totalKm = useMemo(() => initialItems.reduce((sum, a) => sum + a.distanceKm, 0), [initialItems])
+  const typeCounts = useMemo(() => countByType(initialItems), [initialItems])
+  // "since May 2025", only when the page handed over the whole archive: a
+  // first page's oldest run is not the first run.
+  const firstMonth = useMemo(() => {
+    if (initialItems.length === 0 || initialItems.length < totalCount) return null
+    const first = initialItems.reduce((min, a) => (a.date < min ? a.date : min), initialItems[0]!.date)
+    return formatDate(first, { precision: 'month', year: 'always' })
+  }, [initialItems, totalCount])
+
   const [debouncedSearch, setDebouncedSearch] = useState('')
   useEffect(() => {
     const id = setTimeout(() => setDebouncedSearch(search), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(id)
   }, [search])
 
-  // Restore from storage rather than a state initializer, which would differ from
-  // the server-rendered markup and trip hydration. It runs as a *layout* effect
-  // (the pattern AppShell already uses for scroll restoration) so it lands in
-  // the same commit as hydration: a passive effect can be deferred long enough
-  // for a keystroke to slip in first, and restoring over it would silently
-  // wipe what was typed.
   const hasRestored = useRef(false)
   useLayoutEffect(() => {
     if (hasRestored.current) return
     hasRestored.current = true
-    const stored = readStoredFilters()
+    const stored = readStoredSearch()
     if (!stored) return
-    /* eslint-disable react-hooks/set-state-in-effect -- one-time restore from sessionStorage on hydration */
-    // Each field only fills a slot the user has not already changed, so a late
-    // restore can never fight an interaction that beat it.
-    setSearch((cur) => (cur === '' ? stored.search : cur))
-    setDebouncedSearch((cur) => (cur === '' ? stored.search : cur))
-    setSelectedType((cur) => (cur === null ? stored.selectedType : cur))
-    setSortBy((cur) => (cur === 'date' ? stored.sortBy : cur))
-    setSortOrder((cur) => (cur === 'desc' ? stored.sortOrder : cur))
-    setExpandedWeeks((cur) => (cur.size === 0 ? new Set(stored.expandedWeeks) : cur))
-    /* eslint-enable react-hooks/set-state-in-effect */
+    // Once, and only into a still-empty field, so it never clobbers a user edit.
+    // Not a state initializer: the server render has no sessionStorage.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSearch((cur) => (cur === '' ? stored : cur))
+    setDebouncedSearch((cur) => (cur === '' ? stored : cur))
   }, [])
 
-  // Persist the *settled* search, not every keystroke: one write per query
-  // rather than one per character, and it keeps the stored value consistent
-  // with what `debouncedSearch` is restored to on the way back.
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    const toStore: StoredFilters = {
-      search: debouncedSearch,
-      selectedType,
-      sortBy,
-      sortOrder,
-      expandedWeeks: Array.from(expandedWeeks),
-    }
     try {
-      sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(toStore))
+      sessionStorage.setItem(SEARCH_STORAGE_KEY, debouncedSearch)
     } catch {
-      // Private mode or a full quota - the filters just won't survive the trip.
     }
-  }, [debouncedSearch, selectedType, sortBy, sortOrder, expandedWeeks])
+  }, [debouncedSearch])
 
-  // Re-query from offset 0 whenever a filter changes. Guards against a stale
-  // response from a previous filter combo landing after a newer one.
-  const requestSeq = useRef(0)
-  const isFirstRender = useRef(true)
+  const activeTypes = filterTypes(filter)
+  const typesKey = activeTypes?.join(',') ?? ''
+  const matches = useMemo(
+    () =>
+      queryRuns(initialItems, {
+        types: typesKey ? (typesKey.split(',') as ActivityQueryKind[]) : null,
+        gearId,
+        search: debouncedSearch,
+        ...sortQuery(sort),
+      }),
+    [initialItems, typesKey, gearId, debouncedSearch, sort],
+  )
+  // The chip answers the tap at once; the list behind it renders just after.
+  const items = useDeferredValue(matches)
+  const matched = matches.length
+
+  const hasActiveFilter = activeTypes !== null || gearId !== null || search.trim() !== ''
+  const currentWeekStart = isoDate(startOfWeek(new Date(`${today}T00:00:00`)))
+  const groups = useMemo(
+    // groupByWeek keeps the order it is given.
+    () => (sort === 'newest' || sort === 'oldest' ? weekRows(groupByWeek(items, currentWeekStart), currentWeekStart) : null),
+    [items, sort, currentWeekStart],
+  )
+  const blocks = useMemo(() => (groups ? listBlocks(groups) : null), [groups])
+  const [weekParam] = useUrlParam('week')
+  // The archive renders a few months at a time: the whole of it at once was the slowest page to become usable.
+  // Back renders as far as the list was read, so the shell's scroll restore lands on the run just left.
+  const [shownBlocks, setShownBlocks] = useState(() => (isPopNavigation() ? savedShownBlocks() : FIRST_BLOCKS))
   useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false
+    try {
+      sessionStorage.setItem(SHOWN_BLOCKS_KEY, String(shownBlocks))
+    } catch {
+    }
+  }, [shownBlocks])
+  const shown = blocks && !weekParam ? blocks.slice(0, shownBlocks) : blocks
+  const shownRows = blocks ? null : items.slice(0, shownBlocks * ROWS_PER_BLOCK)
+  const moreToShow = blocks ? !!shown && shown.length < blocks.length : shownRows!.length < items.length
+  // State, not a ref: the sentinel remounts when the map gives way to the list, and the observer must follow it.
+  const [moreNode, setMoreNode] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const node = moreNode
+    if (!moreToShow || !node) return
+    if (typeof IntersectionObserver === 'undefined') {
+      startTransition(() => setShownBlocks(Number.POSITIVE_INFINITY))
       return
     }
-    const seq = ++requestSeq.current
-    setIsPending(true)
-    fetchActivities({ type: selectedType, search: debouncedSearch, sortBy, sortOrder, offset: 0 })
-      .then((result) => {
-        if (seq !== requestSeq.current) return
-        setIsPending(false)
-        setItems(result.items)
-        setNextOffset(result.nextOffset)
-      })
-      // Without this a failed request leaves the spinner up forever, hiding
-      // both the list and the empty state.
-      .catch(() => {
-        if (seq !== requestSeq.current) return
-        setIsPending(false)
-      })
-  }, [selectedType, debouncedSearch, sortBy, sortOrder])
-
-  const hasMore = nextOffset !== null
-  const hasActiveFilter = selectedType !== null || search.trim() !== ''
-  // Week separators only make sense when browsing in chronological order.
-  const groups = sortBy === 'date' ? groupByWeek(items) : null
-
-  const loadMore = useCallback(() => {
-    if (nextOffset === null || loadingMore) return
-    setLoadingMore(true)
-    const seq = requestSeq.current
-    fetchActivities({ type: selectedType, search: debouncedSearch, sortBy, sortOrder, offset: nextOffset })
-      .then((result) => {
-        setLoadingMore(false)
-        if (seq !== requestSeq.current) return
-        setItems((prev) => [...prev, ...result.items])
-        setNextOffset(result.nextOffset)
-      })
-      // A failed page must release the guard, or infinite scroll wedges.
-      .catch(() => setLoadingMore(false))
-  }, [nextOffset, loadingMore, selectedType, debouncedSearch, sortBy, sortOrder])
-
-  const sentinelRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!hasMore) return
-    const node = sentinelRef.current
-    if (!node) return
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting) loadMore()
+        if (entries[0]?.isIntersecting) startTransition(() => setShownBlocks((n) => n + MORE_BLOCKS))
       },
-      { rootMargin: '200px' }
+      { rootMargin: '1500px 0px' },
     )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [hasMore, loadMore])
+  }, [moreToShow, shownBlocks, moreNode])
+
+  // ?week= (a Monday) scrolls that week's card into view once the list holding it has loaded.
+  useEffect(() => {
+    if (!weekParam || !blocks) return
+    const frame = requestAnimationFrame(() => document.getElementById(`week-${weekParam}`)?.scrollIntoView({ block: 'start' }))
+    return () => cancelAnimationFrame(frame)
+  }, [weekParam, blocks])
 
   function resetFilters() {
-    setSelectedType(null)
+    setFilter(ALL_RUNS)
+    setGearId(null)
     setSearch('')
+    setSortParam(null)
   }
 
-  return (
-    <div className="space-y-4">
-      <div className="px-1">
-        <h1 className="font-display text-title1 font-bold leading-[1.1] tracking-tight text-foreground">
-          {t.pages.activities.title}
-        </h1>
-        <p className="mt-0.5 text-footnote font-medium text-muted-foreground">
-          {t.activities.count(totalCount)}
-        </p>
+  const archiveLine = [
+    totalKm > 0 ? t.activities.countWithDistance(totalCount, formatKm(totalKm)) : t.activities.count(totalCount),
+    firstMonth ? t.activities.since(firstMonth) : null,
+  ].filter((part): part is string => part !== null)
 
-        <div className="relative mt-3">
-          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-subtle-2" />
-          <input
-            type="text"
-            placeholder={t.activities.searchPlaceholder}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-10 w-full rounded-[11px] bg-foreground/[0.05] pl-9 pr-3 text-sm text-foreground placeholder-subtle-2 focus:outline-none"
+  const pickedLabel = typesLabel(filter.types)
+  const onlyGroup = filter.types.length === 0 && filter.group !== 'all' && gearId === null && search.trim() === '' ? filter.group : null
+  // Only when the page handed over the whole archive, so "1 of 5 runs" is never a page's count.
+  const weekTotals = useMemo(() => {
+    if (initialItems.length < totalCount) return null
+    const totals = new Map<string, number>()
+    for (const a of initialItems) {
+      const monday = isoDate(startOfWeek(new Date(`${a.date.slice(0, 10)}T00:00:00`)))
+      totals.set(monday, (totals.get(monday) ?? 0) + 1)
+    }
+    return totals
+  }, [initialItems, totalCount])
+  const countedLabel = onlyGroup
+    ? t.activities.filter.groupCount[onlyGroup](matched)
+    : hasActiveFilter
+      ? t.activities.count(matched)
+      : t.activities.weekLine.runs(matched)
+  const totalsLabel = onlyGroup ? t.activities.filter.groupTotals[onlyGroup] : t.activities.filter.totalsCount
+
+  return (
+    <div className="flex flex-col gap-3">
+      <header>
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="min-w-0 text-display text-foreground">{t.pages.activities.title}</h1>
+          <SegmentedTabs
+            tabs={viewTabs}
+            items={[
+              { id: 'list', label: t.activities.view.list },
+              { id: 'map', label: t.activities.view.map },
+            ]}
+            label={t.activities.view.label}
+            barMirror
           />
         </div>
-      </div>
+        <p data-title-sub className="mt-0.5 text-[15px] leading-5 text-muted-foreground">{archiveLine.join(' · ')}</p>
+      </header>
 
-      <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <Pill
-          as="button"
-          variant={selectedType === null ? 'active' : 'neutral'}
-          className={cn('text-footnote font-semibold', selectedType === null && ACTIVE_CHIP_SHADOW)}
-          onClick={() => setSelectedType(null)}
-        >
-          {t.activities.all}
-        </Pill>
-        {ALL_TYPES.map((type) => {
-          const active = selectedType === type
-          return (
-            <Pill
-              key={type}
-              as="button"
-              variant={active ? 'active' : 'neutral'}
-              dotColor={active ? undefined : ACTIVITY_TYPE_CONFIG[type].chartColor}
-              className={cn('text-footnote font-semibold', active && ACTIVE_CHIP_SHADOW)}
-              onClick={() => setSelectedType(active ? null : type)}
-            >
-              {t.activityTypes[type]}
-            </Pill>
-          )
-        })}
-      </div>
+      <div {...viewTabs.panelProps} className="flex flex-col gap-3 outline-none">
+        {view === 'map' ? (
+          // This device's today, so a page kept from another day still finds the right plan.
+          <GlobalMapWrapper version={map.version} clusterId={map.clusterId} exploreAreas={exploreAreas} explorePlans={explorePlans} completedSince={exploreCompletedSince} today={today} />
+        ) : (
+          <>
 
-      {/* Secondary controls: heatmap link + sort - not in the visual spec, kept from the existing feature set */}
-      <div className="flex items-center justify-end gap-2">
-        <Link
-          href="/map"
-          className="rounded-control border border-foreground/[0.12] bg-foreground/[0.06] px-2.5 py-1 text-xs font-medium text-foreground/70 transition-colors hover:bg-foreground/[0.10]"
-        >
-          {t.nav.items.heatmap}
-        </Link>
-        <SortDropdown
-          options={SORT_OPTIONS}
-          sortBy={sortBy}
-          order={sortOrder}
-          onChange={(value, order) => {
-            setSortBy(value)
-            setSortOrder(order)
-          }}
-          label={t.activities.sort.label}
-        />
-      </div>
+            <div className="on-aura-group">
+              <i aria-hidden="true" className="on-aura-blur inset-0 rounded-full" />
+              <label className="on-aura flex h-11 items-center gap-2 rounded-full px-3.5 text-muted-foreground transition-shadow focus-within:shadow-[0_0_0_2px_var(--ring)]">
+                <Search size={18} strokeWidth={2.2} aria-hidden="true" className="shrink-0" />
+                <input
+                  type="text"
+                  placeholder={t.activities.searchPlaceholder}
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="h-full min-w-0 flex-1 bg-transparent text-[17px] text-foreground placeholder:text-muted-foreground focus:outline-none"
+                />
+              </label>
+            </div>
 
-      {isPending ? (
-        <div className="flex justify-center py-10">
-          <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted-foreground border-t-accent" />
-        </div>
-      ) : items.length === 0 ? (
-        <GlassSurface variant="card" className="rounded-2xl py-12 text-center">
-          <SearchX size={24} className="mx-auto text-subtle" />
-          <p className="mt-3 text-sm text-subtle">
-            {hasActiveFilter ? t.activities.emptyFiltered : t.activities.empty}
-          </p>
-          {hasActiveFilter && (
-            <button
-              onClick={resetFilters}
-              className="mt-4 text-xs font-semibold text-accent-text transition-opacity hover:opacity-70"
-            >
-              {t.activities.resetFilters}
-            </button>
-          )}
-        </GlassSurface>
-      ) : groups ? (
-        <div className="space-y-3">
-          {groups.map((g, i) => {
-            const isCurrent = i === 0
-            const isExpanded = isCurrent || expandedWeeks.has(g.key)
-            return (
-              <div key={g.key}>
-                {isCurrent ? (
-                  <div
-                    className="sticky top-[max(var(--safe-top),8px)] z-10 flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5"
-                    style={{
-                      background: 'color-mix(in srgb, var(--accent) 8%, transparent)',
-                      borderColor: 'color-mix(in srgb, var(--accent) 22%, transparent)',
-                    }}
-                  >
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-foreground">{g.label}</div>
-                      <div className="text-micro text-subtle">{g.range}</div>
-                    </div>
-                    <div className="flex shrink-0 items-end gap-4 text-right">
-                      <WeekStat value={String(Math.round(g.totalKm))} label={t.activities.weekStat.km} />
-                      <WeekStat value={String(g.items.length)} label={t.activities.weekStat.runs} />
-                      <WeekStat value={g.easyPct !== null ? `${g.easyPct}/${g.hardPct}` : '–'} label={t.activities.weekStat.easyHard} />
-                    </div>
-                  </div>
+            {/* The rail reaches past its row, to the screen's edges and 36 pt down, so
+                its scroll box does not clip the chips' glass drop; what follows paints,
+                and takes taps, over that margin. One blur lies under the whole row, not
+                one per chip. */}
+            <div className="on-aura-group flex items-center gap-2">
+              <i aria-hidden="true" className="on-aura-blur on-aura-blur-row -inset-x-4 inset-y-0" />
+              <div className="-mx-4 -mb-9 -mt-1.5 flex min-w-0 flex-1 gap-2 overflow-x-auto px-4 pb-9 pt-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" data-testid="type-chips">
+                {filter.types.length > 0 ? (
+                  <Pill as="button" variant="selected" className="min-w-0 gap-1.5" onClick={() => setFilter(ALL_RUNS)} aria-label={t.activities.filter.clearTypes(pickedLabel)}>
+                    <span className="truncate">{pickedLabel}</span>
+                    <X size={14} aria-hidden="true" className="shrink-0" />
+                  </Pill>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setExpandedWeeks((prev) => {
-                        const next = new Set(prev)
-                        if (next.has(g.key)) next.delete(g.key)
-                        else next.add(g.key)
-                        return next
-                      })
-                    }
-                    className="glass-card flex w-full items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 text-left"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold text-foreground">{g.label}</div>
-                      <div className="mt-0.5 text-caption text-subtle">
-                        {t.activities.weekGroupCompact(g.items.length, Math.round(g.totalKm))}
-                      </div>
-                    </div>
-                    <ChevronDown size={16} className={cn('shrink-0 text-subtle transition-transform', isExpanded && 'rotate-180')} />
-                  </button>
-                )}
-                {isExpanded && (
-                  <div className="mt-2 space-y-2">
-                    {g.items.map((a) => (
-                      <ActivityListCard key={a.id} activity={a} qualifiedEfforts={qualifiedEffortsByActivityId[a.id]} />
-                    ))}
-                  </div>
+                  GROUP_IDS.map((group) => (
+                    <Pill
+                      key={group}
+                      as="button"
+                      variant={filter.group === group ? 'selected' : 'onAura'}
+                      // 12 pt a side, so French's four fit beside the button at 393 pt.
+                      className="px-3"
+                      aria-pressed={filter.group === group}
+                      onClick={() => setFilter({ group, types: [] })}
+                    >
+                      {group === 'all' ? t.activities.all : t.activities.groups[group]}
+                    </Pill>
+                  ))
                 )}
               </div>
-            )
-          })}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {items.map((a) => (
-            <ActivityListCard key={a.id} activity={a} qualifiedEfforts={qualifiedEffortsByActivityId[a.id]} />
-          ))}
-        </div>
-      )}
+              <button
+                type="button"
+                onClick={() => setSheetOpen(true)}
+                aria-label={t.activities.filter.title}
+                aria-haspopup="dialog"
+                className="on-aura hit-44 relative flex size-9 shrink-0 items-center justify-center rounded-full text-foreground"
+              >
+                <SlidersHorizontal size={17} aria-hidden="true" />
+                {(sort !== 'newest' || hasActiveFilter) && (
+                  <span aria-hidden="true" data-testid="sheet-dot" className="absolute right-0.5 top-0.5 box-content size-2 rounded-full border-2 border-[var(--background)] bg-accent" />
+                )}
+              </button>
+            </div>
 
-      {/* B6 - infinite scroll sentinel / end of list */}
-      {hasMore && <div ref={sentinelRef} aria-hidden="true" className="h-1" />}
-      {!hasMore && items.length > 0 && (
-        <p className="py-2 text-center text-xs text-subtle">{t.activities.endOfList}</p>
+            {gearId && (
+              <div>
+                <Pill as="button" variant="selected" className="gap-1.5" onClick={() => setGearId(null)} aria-label={t.activities.shoeFilter.clear}>
+                  {shoeNames[gearId] ?? gearId}
+                  <X size={14} aria-hidden="true" />
+                </Pill>
+              </div>
+            )}
+
+            {(hasActiveFilter || sort !== 'newest') && (
+              <div
+                className="flex items-center justify-between gap-3 rounded-xl border px-3 py-[9px] text-[12.5px]"
+                style={{
+                  background: 'color-mix(in srgb, var(--accent) 9%, var(--background))',
+                  borderColor: 'color-mix(in srgb, var(--accent) 22%, var(--background))',
+                }}
+                data-testid="filter-bar"
+              >
+                <p className="min-w-0 text-[var(--text-2)] text-pretty">
+                  {t.activities.filter.showing}{' '}
+                  <b className="font-semibold text-foreground">{countedLabel}</b>
+                  {hasActiveFilter && totalsLabel}
+                  {sort !== 'newest' && ` · ${t.activities.filter.sortedBy[sort]}`}
+                </p>
+                <button type="button" onClick={resetFilters} className="hit-44 shrink-0 font-medium text-accent-text">
+                  {t.activities.filter.clear}
+                </button>
+              </div>
+            )}
+
+            {items.length === 0 ? (
+              <div className={cardClass({ padding: 'none', className: 'py-12 text-center' })}>
+                <SearchX size={24} className="mx-auto text-subtle" />
+                <p className="mt-3 text-sm text-muted-foreground">
+                  {hasActiveFilter ? t.activities.emptyFiltered : t.activities.empty}
+                </p>
+                {hasActiveFilter && (
+                  <button
+                    onClick={resetFilters}
+                    className="mt-4 text-xs font-semibold text-accent-text transition-opacity hover:opacity-70"
+                  >
+                    {t.activities.resetFilters}
+                  </button>
+                )}
+              </div>
+            ) : blocks ? (
+              <div className="flex flex-col gap-3.5">
+                {shown!.map((block) =>
+                  block.kind === 'current' ? (
+                    // Its km and runs, not the plan: Today and Plan show the week against plan.
+                    <section key={block.week.key} id={`week-${block.week.key}`} className="scroll-mt-24" data-testid="current-week">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 px-1 pb-2">
+                        <h2 className="text-title-3 text-foreground">{t.activities.thisWeek}</h2>
+                        <span className="text-[13px] text-muted-foreground" data-testid="week-line">
+                          <span className={KM_STRONG}>{formatRanKm(block.week.totalKm)}</span> {t.units.km} · {t.activities.weekLine.runs(block.week.items.length)}
+                          {!hasActiveFilter && block.week.easyPct !== null && ` · ${t.activities.weekLine.easy(block.week.easyPct)}`}
+                        </span>
+                      </div>
+                      <div className={cardClass({ padding: 'none', overflow: true })}>
+                        <InsetRows items={block.week.items} efforts={qualifiedEffortsByActivityId} types={sessionTypes} />
+                      </div>
+                    </section>
+                  ) : (
+                    <section key={block.key} data-testid="month">
+                      {/* Sticky under the compact title bar while it shows; on a phone not
+                          otherwise (--sticky-alone, globals.css). */}
+                      <div
+                        data-sticky-strip
+                        className="sticky z-30 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 bg-background px-1 pb-2 pt-3.5 max-lg:bg-transparent"
+                        style={{ top: 'var(--sticky-top, var(--sticky-alone, var(--safe-top)))' }}
+                      >
+                        <h2 className="text-title-3 capitalize text-foreground">{block.label}</h2>
+                        <span className="text-[13px] text-muted-foreground" data-testid="month-line">
+                          {onlyGroup
+                            ? `${t.activities.filter.groupCount[onlyGroup](block.runs)} · ${formatKm(block.km)} ${t.units.km}`
+                            : `${formatKm(block.km)} ${t.units.km} · ${t.activities.weekLine.runs(block.runs)}`}
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-3">
+                        {block.weeks.map((g) => (
+                          // Off screen, a week is skipped by style and layout: the whole archive is one page.
+                          <section
+                            key={g.key}
+                            id={`week-${g.key}`}
+                            className={cardClass({ padding: 'none', overflow: true, className: 'scroll-mt-24 [content-visibility:auto]' })}
+                            style={{ containIntrinsicSize: `auto ${WEEK_HEADER_PX + g.items.length * ROW_PX}px` }}
+                            data-testid="week"
+                          >
+                            <div className="flex items-baseline justify-between gap-4 px-4 pb-1.5 pt-3.5">
+                              <h3 className="whitespace-nowrap text-headline text-foreground">{g.label}</h3>
+                              <PastWeekLine group={g} showEasy={!hasActiveFilter} weekTotal={hasActiveFilter ? (weekTotals?.get(g.key) ?? null) : null} />
+                            </div>
+                            <InsetRows items={g.items} efforts={qualifiedEffortsByActivityId} types={sessionTypes} />
+                          </section>
+                        ))}
+                      </div>
+                    </section>
+                  ),
+                )}
+              </div>
+            ) : (
+              // Separators start under the titles, past the 48 pt thumbs.
+              // Off screen, a row is skipped by style and layout, as a week is under the months.
+              <div className={cardClass({ padding: 'none', overflow: true, className: 'inset-group [--row-thumb-inset:78px] *:[content-visibility:auto] *:[contain-intrinsic-size:auto_72px]' })}>
+                {shownRows!.map((a) => (
+                  <ActivityThumbRow key={a.id} activity={a} qualifiedEfforts={qualifiedEffortsByActivityId[a.id]} type={sessionTypes[a.id]} />
+                ))}
+              </div>
+            )}
+
+            {moreToShow && <div ref={setMoreNode} aria-hidden="true" className="h-px" />}
+            {items.length > 0 && !moreToShow && (
+              <p className="py-2 text-center text-xs text-subtle">{t.activities.endOfList}</p>
+            )}
+          </>
+        )}
+      </div>
+
+      {sheetOpen && (
+        <ActivityFilterSheet
+          types={checkedTypes(filter)}
+          sort={sort}
+          counts={typeCounts}
+          onApply={(types, nextSort) => {
+            setFilter(normalizeTypes(types))
+            setSortParam(nextSort === 'newest' ? null : nextSort)
+          }}
+          onClose={() => setSheetOpen(false)}
+        />
       )}
     </div>
   )

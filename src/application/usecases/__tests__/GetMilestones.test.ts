@@ -5,6 +5,7 @@ import {
   findActivityCountMilestones,
   currentWeekStreak,
   longestWeekStreak,
+  findNextMilestones,
 } from '../GetMilestones'
 import type { Activity } from '@/domain/activity/types'
 import { isoWeekNumber } from '@/lib/calendarDate'
@@ -13,8 +14,8 @@ describe('findDistanceTierMilestones', () => {
   it('records each tier crossed as cumulative distance grows', () => {
     const acts = [
       { date: '2026-01-01', distanceKm: 300 },
-      { date: '2026-02-01', distanceKm: 300 }, // crosses 500
-      { date: '2026-03-01', distanceKm: 500 }, // crosses 1000
+      { date: '2026-02-01', distanceKm: 300 },
+      { date: '2026-03-01', distanceKm: 500 },
     ]
     const crossings = findDistanceTierMilestones(acts, [500, 1000, 1500])
     expect(crossings).toEqual([
@@ -95,29 +96,29 @@ describe('currentWeekStreak', () => {
   })
 
   it('counts consecutive active weeks back from now', () => {
-    const now = new Date('2026-07-06T00:00:00') // Monday
-    const acts = [act('2026-07-06'), act('2026-06-29'), act('2026-06-22')] // 3 consecutive weeks
+    const now = new Date('2026-07-06T00:00:00')
+    const acts = [act('2026-07-06'), act('2026-06-29'), act('2026-06-22')]
     const streak = currentWeekStreak(acts, now)
     expect(streak?.weeks).toBe(3)
   })
 
   it('stops counting at the first inactive week', () => {
     const now = new Date('2026-07-06T00:00:00')
-    const acts = [act('2026-07-06'), act('2026-06-22')] // gap on 06-29
+    const acts = [act('2026-07-06'), act('2026-06-22')]
     const streak = currentWeekStreak(acts, now)
     expect(streak?.weeks).toBe(1)
   })
 
   it('carries the streak into a new week that has no run yet, instead of resetting to 0', () => {
-    const now = new Date('2026-07-13T00:00:00') // Monday, brand-new week, nothing logged today
-    const acts = [act('2026-07-06'), act('2026-06-29'), act('2026-06-22')] // 3 consecutive prior weeks
+    const now = new Date('2026-07-13T00:00:00')
+    const acts = [act('2026-07-06'), act('2026-06-29'), act('2026-06-22')]
     const streak = currentWeekStreak(acts, now)
     expect(streak?.weeks).toBe(3)
   })
 
   it('null when neither the current nor the previous week has an activity', () => {
     const now = new Date('2026-07-13T00:00:00')
-    const acts = [act('2026-06-22')] // last week (07-06) is also empty - streak actually broken
+    const acts = [act('2026-06-22')]
     expect(currentWeekStreak(acts, now)).toBeNull()
   })
 })
@@ -131,15 +132,47 @@ describe('longestWeekStreak', () => {
 
   it('finds the longest run of consecutive active weeks, not just the current one', () => {
     const acts = [
-      act('2026-01-05'), act('2026-01-12'), act('2026-01-19'), act('2026-01-26'), // 4-week run
-      act('2026-03-02'), // isolated week
-      act('2026-06-01'), act('2026-06-08'), // 2-week run
+      act('2026-01-05'), act('2026-01-12'), act('2026-01-19'), act('2026-01-26'),
+      act('2026-03-02'),
+      act('2026-06-01'), act('2026-06-08'),
     ]
     expect(longestWeekStreak(acts)).toBe(4)
+  })
+
+  it('counts only weeks with enough runs when given a weekly target (3.1)', () => {
+    const acts = [
+      act('2026-06-01'), act('2026-06-02'), act('2026-06-03'),
+      act('2026-06-08'), act('2026-06-09'), act('2026-06-10'),
+      act('2026-06-15'),
+    ]
+    expect(longestWeekStreak(acts, 3)).toBe(2)
+    expect(longestWeekStreak(acts)).toBe(3)
+    // The week of 15 June is under way and under target: the streak holds from the week before.
+    expect(currentWeekStreak(acts, new Date('2026-06-16T00:00:00'), 3)?.weeks).toBe(2)
+    expect(currentWeekStreak(acts, new Date('2026-06-23T00:00:00'), 3)).toBeNull()
   })
 
   it('counts a run spanning a calendar year boundary', () => {
     const acts = [act('2025-12-22'), act('2025-12-29'), act('2026-01-05')]
     expect(longestWeekStreak(acts)).toBe(3)
+  })
+})
+
+describe('findNextMilestones', () => {
+  const runs = (n: number, date: string, km: number) => Array.from({ length: n }, () => ({ date, distanceKm: km }))
+
+  it('names the next run count and this year\'s next distance, with what is left', () => {
+    const acts = [...runs(100, '2025-06-01', 10), ...runs(215, '2026-03-01', 7.2932)]
+    const [count, distance] = findNextMilestones(acts, 2026, [250, 300, 350, 400], [500, 1000, 1500, 2000])
+
+    expect(count).toMatchObject({ kind: 'activity-count', remaining: 35 })
+    expect(count!.progress).toBeCloseTo(0.9)
+    // 1,568 km this year: 2,000 is next, 432 to go - last year's 1,000 km does not count.
+    expect(distance).toMatchObject({ kind: 'distance-tier', remaining: 432 })
+    expect(distance!.progress).toBeCloseTo(1568 / 2000, 3)
+  })
+
+  it('drops a milestone past its last tier', () => {
+    expect(findNextMilestones(runs(5, '2026-01-01', 100), 2026, [5], [500])).toEqual([])
   })
 })

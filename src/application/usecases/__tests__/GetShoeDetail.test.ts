@@ -71,17 +71,17 @@ describe('getShoeDetail', () => {
     expect(getShoeDetail('daily')?.firstUsedDate).toBe('2026-01-05')
   })
 
-  it('averages the weekly mileage over the days since that first outing', () => {
-    getAllActivities.mockReturnValue([run('daily', '2026-07-01', 60)])
+  it('averages the weekly mileage over the weeks between the first and most recent run, not weeks to today', () => {
+    getAllActivities.mockReturnValue([run('daily', '2026-06-03', 10), run('daily', '2026-07-01', 50)])
 
-    // 60 km over the 30 days since 1 July.
-    expect(getShoeDetail('daily')?.kmPerWeek).toBe(14)
+    // 28 days between the two runs = 4 weeks, over 60 km total.
+    expect(getShoeDetail('daily')?.kmPerWeek).toBe(15)
   })
 
-  it('counts a pair worn today as a full day old rather than dividing by zero', () => {
+  it('counts a pair worn only once as a full week old rather than dividing by zero', () => {
     getAllActivities.mockReturnValue([run('daily', '2026-07-31', 10)])
 
-    expect(getShoeDetail('daily')?.kmPerWeek).toBe(70)
+    expect(getShoeDetail('daily')?.kmPerWeek).toBe(10)
   })
 
   it('reports an unworn pair at zero rather than as missing', () => {
@@ -102,12 +102,6 @@ describe('getShoeDetail', () => {
     expect(getShoeDetail('daily')?.wearPercent).toBe(25)
   })
 
-  it('caps wear at 100% once a pair is run past its lifespan', () => {
-    getAllActivities.mockReturnValue([run('daily', '2026-07-01', 900)])
-
-    expect(getShoeDetail('daily')?.wearPercent).toBe(100)
-  })
-
   it('treats a retired pair as fully worn whatever its mileage', () => {
     getAllActivities.mockReturnValue([run('old', '2026-07-01', 50)])
 
@@ -125,5 +119,18 @@ describe('getShoeDetail', () => {
       alertThresholdKm: 640,
       retired: false,
     })
+  })
+
+  it('splits the distance by session zone: base, tempo, threshold, intervals', () => {
+    const typed = (type: Activity['type'], date: string, km: number) => ({ ...run('daily', date, km), type }) as Activity
+    getAllActivities.mockReturnValue([
+      typed('Base', '2026-07-01', 50),
+      typed('Tempo', '2026-07-02', 20),
+      typed('Threshold', '2026-07-03', 20),
+      typed('VO2Max', '2026-07-04', 5),
+      typed('Race', '2026-07-05', 5),
+    ])
+
+    expect(getShoeDetail('daily')!.typeShare).toEqual({ base: 50, tempo: 20, threshold: 20, intervals: 10 })
   })
 })

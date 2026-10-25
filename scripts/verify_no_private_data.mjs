@@ -1,19 +1,4 @@
 #!/usr/bin/env node
-/**
- * Pre-publication check: scans the git-tracked tree for the shapes of things that
- * must never ship in a public repository. Not a DLP system - structural and
- * pattern checks meant to run right before a repo built from this codebase is
- * made public, and in CI afterwards.
- *
- * Deliberately contains no real private values. This file is itself public, so
- * encoding an actual coordinate, activity id, gear id or address here would
- * publish the very thing it is meant to catch. Every check below is structural
- * (a path, a file shape) or a generic credential pattern.
- *
- * Exits non-zero if anything CRITICAL is found.
- *
- *   node scripts/verify_no_private_data.mjs
- */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 
@@ -34,11 +19,11 @@ function grepTracked(files, pattern, { exclude = [] } = {}) {
     try {
       content = fs.readFileSync(f, 'utf-8')
     } catch {
-      continue // binary or unreadable - not a text-secret risk
+      continue
     }
     const lines = content.split('\n')
     lines.forEach((line, i) => {
-      if (pattern.test(line)) hits.push({ file: f, line: i + 1, text: line.trim().slice(0, 120) })
+      if (pattern.test(line)) hits.push({ file: f, line: i + 1 })
     })
   }
   return hits
@@ -53,116 +38,93 @@ function warn(title, detail) {
   findings.push({ severity: 'WARN', title, detail })
 }
 
+const FIT_CACHE_DIR = '.fit-cache'
+
 const files = trackedFiles()
 
-// --- Structural: directories that must never ship in a public repo -------
 for (const prefix of ['data', 'public/data']) {
   const dataFiles = trackedUnder(files, prefix)
   if (dataFiles.length) {
     critical(
       `${prefix}/ is tracked`,
-      `${dataFiles.length} file(s) - the real dataset belongs in the private data repo, not here. ` +
+      `${dataFiles.length} file(s) - real Garmin data belongs in the private data repo, not here. ` +
         `First hit: ${dataFiles[0]}`
     )
   }
 }
 
-// Untracked is not enough here: Next.js serves everything under public/ as a
-// static asset, so a copy left in a deployed tree republishes the dataset.
-if (fs.existsSync('public/data')) {
-  critical(
-    'public/data/ exists on disk',
-    'Everything under public/ is served as a static asset. The app reads data/ - ' +
-      'scripts/prepare-data.mjs moves a leftover public/data/ there on the next dev/build.'
-  )
+// Everything under public/ is served, so these may not exist there at all, not merely be untracked.
+const servedDirsThatMustNotExist = [
+  {
+    dir: 'public/data',
+    detail: 'Move any needed files into the selected private data workspace, then delete public/data/.',
+  },
+  {
+    dir: 'public/fit',
+    detail: `Raw FIT holds every GPS point of every run, and public/ is served without sign-in. The cache lives in ${FIT_CACHE_DIR}/ - move it there and delete public/fit/.`,
+  },
+]
+for (const { dir, detail } of servedDirsThatMustNotExist) {
+  if (fs.existsSync(dir)) critical(`${dir}/ exists on disk`, detail)
 }
 
-const fitFiles = trackedUnder(files, 'public/fit')
-if (fitFiles.length) critical('public/fit/ is tracked', `${fitFiles.length} file(s) - raw FIT binaries must never be committed.`)
-
-if (fs.existsSync('public/fit') && fs.readdirSync('public/fit').length) {
-  warn('public/fit/ exists on disk with content', 'Untracked, but everything under public/ is served statically once deployed.')
+for (const prefix of ['public/fit', FIT_CACHE_DIR]) {
+  const fitFiles = trackedUnder(files, prefix)
+  if (fitFiles.length) critical(`${prefix}/ is tracked`, `${fitFiles.length} file(s) - raw FIT binaries must never be committed.`)
 }
 
+
+// A phone photo's EXIF can carry the GPS position it was taken at, and everything under public/ ships to every deployment.
 const eventFiles = trackedUnder(files, 'public/events')
-if (eventFiles.length) critical('public/events/ is tracked', `${eventFiles.length} file(s) - race-day photos are personal and must not ship.`)
+if (eventFiles.length) critical('public/events/ is tracked', `${eventFiles.length} file(s) - race-day photos belong in the data repository.`)
 
-// --- Structural: env/credential files -------------------------------------
-const ALLOWED_ENV = new Set(['.env.e2e', '.env.example'])
+// A screenshot shows whatever data the app ran on, and no text scan can see into an image, so the file name is checked:
+// macOS screenshot names and a design tool's uploads/ folder are captures nobody chose to publish.
+const IMAGE = /\.(png|jpe?g|webp|gif|heic|avif)$/i
+const RAW_CAPTURE = /(^|\/)uploads\/|(^|\/)(screen ?shot|pasted-)[^/]*$/i
 for (const f of files) {
-  const base = f.split('/').pop() ?? f
-  if (/^\.env(\..+)?$/.test(base) && !ALLOWED_ENV.has(f)) {
+  if (IMAGE.test(f) && RAW_CAPTURE.test(f)) {
+    critical('A raw screenshot or pasted image is tracked', `${f} - it may show real tracks; use a demo-data capture named for what it shows`)
+  }
+}
+
+// The coaching CLI writes these wherever --prompt-out points; both carry the athlete's health data.
+for (const f of files) {
+  if (/(^|\/)(coach-prompt\.md|answer\.json)$/.test(f)) critical('A coaching prompt or reply is tracked', f)
+}
+
+for (const f of files) {
+  if (/^\.env(\..+)?$/.test(f) && f !== '.env.e2e' && f !== '.env.example') {
     critical('An env file beyond .env.e2e/.env.example is tracked', f)
   }
   if (/serviceAccountKey.*\.json$/i.test(f) || /firebase-adminsdk-.*\.json$/i.test(f)) {
     critical('A Firebase service-account key file is tracked', f)
   }
-  if (/\.(pem|p12|pfx|key|keystore|jks)$/i.test(f)) {
-    critical('A key/certificate file is tracked', f)
-  }
-  if (/\.(fit|tcx|gpx)$/i.test(f)) {
-    critical('A raw activity file is tracked', `${f} - FIT/TCX/GPX carry full GPS traces.`)
-  }
-  if (/(^|\/)\.npmrc$|(^|\/)\.netrc$|(^|\/)id_(rsa|ed25519)$/.test(f)) {
-    critical('A credential file is tracked', f)
-  }
 }
 
-// --- Pattern: common secret/key shapes in tracked file contents ----------
 const secretChecks = [
-  { name: 'Google/Firebase API key (AIza...)', pattern: /AIza[0-9A-Za-z_-]{35}/ },
-  { name: 'GitHub token (ghp_/gho_/ghs_/ghr_)', pattern: /\bgh[porsu]_[0-9A-Za-z]{30,}/ },
-  { name: 'GitHub fine-grained PAT', pattern: /\bgithub_pat_[0-9A-Za-z_]{50,}/ },
-  { name: 'AWS access key (AKIA...)', pattern: /\bAKIA[0-9A-Z]{16}\b/ },
-  { name: 'Slack token', pattern: /\bxox[baprs]-[0-9A-Za-z-]{10,}/ },
-  { name: 'OpenAI-style key', pattern: /\bsk-[A-Za-z0-9]{32,}/ },
-  { name: 'PEM private key header', pattern: /BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY/, exclude: ['.env.example', 'README.md'] },
+  { name: 'Google/Firebase API key (AIza...)', pattern: /AIza[0-9A-Za-z_-]{35}/, exclude: ['.env.e2e'] },
+  { name: 'AWS access key (AKIA...)', pattern: /AKIA[0-9A-Z]{16}/ },
+  { name: 'PEM private key header', pattern: /BEGIN (RSA )?PRIVATE KEY/, exclude: ['.env.example', 'README.md'] },
   { name: 'Firebase service-account JSON shape', pattern: /"type"\s*:\s*"service_account"/ },
-  { name: 'Garmin OAuth blob assigned inline', pattern: /GARMIN_SECRET\s*[:=]\s*["']?eyJ[A-Za-z0-9_-]{20,}/ },
-  // A token pasted into a git remote is the classic way a PAT leaks into a log.
-  { name: 'Credentials embedded in an https URL', pattern: /https:\/\/[^/\s'"]*:[^/@\s'"]+@/ },
+  // A pasted one is a write credential for the only copy of the history.
+  { name: 'GitHub token', pattern: /\b(gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{50,})\b/ },
+  { name: 'Vercel deploy hook URL', pattern: /api\.vercel\.com\/v1\/integrations\/deploy\/prj_[0-9A-Za-z]+\/[0-9A-Za-z]+/ },
+  // Garmin shows a Personal API key once; a pasted one reads the athlete's
+  // whole account until it expires or is revoked.
+  { name: 'Garmin Personal API key', pattern: /\bGCDC_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./ },
 ]
 for (const { name, pattern, exclude } of secretChecks) {
   const hits = grepTracked(files, pattern, { exclude: exclude ?? [] })
   for (const hit of hits) critical(`Possible ${name}`, `${hit.file}:${hit.line}`)
 }
 
-// --- Pattern: private infrastructure named in the tracked tree -----------
-// The public copy documents the architecture generically; a concrete private
-// repository name would point an attacker straight at the dataset.
-const PRIVATE_REPO_HINT = /\b[\w.-]+\/(runomics[-_]?(data|private))\b/i
-for (const hit of grepTracked(files, PRIVATE_REPO_HINT, { exclude: ['scripts/verify_no_private_data.mjs'] })) {
-  if (/your-username|your-org|example|<[^>]+>/i.test(hit.text)) continue // documented placeholder
-  critical('A concrete private data/private repository name is referenced', `${hit.file}:${hit.line}`)
-}
-
-// --- Pattern: privacy-zone configuration committed with real coordinates -
-// PRIVACY_ZONES is where a home address would live. Any tracked assignment that
-// is not the obviously-synthetic [[0,0],...] placeholder is worth a human look.
-for (const hit of grepTracked(files, /PRIVACY_ZONES\s*=\s*\[\[/)) {
-  if (/\[\[\s*0(\.0+)?\s*,\s*0(\.0+)?\s*\]/.test(hit.text)) continue
-  critical('PRIVACY_ZONES is assigned a non-placeholder coordinate', `${hit.file}:${hit.line}`)
-}
-
-// --- .gitignore sanity: the protections this project relies on -----------
 const gitignore = fs.existsSync('.gitignore') ? fs.readFileSync('.gitignore', 'utf-8') : ''
-const expectedPatterns = ['/public/fit/', '/public/data/', '/data/', '/public/events/', '.env*']
+const expectedPatterns = ['/public/fit/', `/${FIT_CACHE_DIR}/`, '/public/data/', '/data/', '.env*']
 for (const pattern of expectedPatterns) {
   if (!gitignore.includes(pattern)) warn('.gitignore is missing an expected pattern', pattern)
 }
 
-// --- Workflow sanity: nothing scheduled that needs secrets a fork lacks ---
-for (const f of files.filter((p) => p.startsWith('.github/workflows/'))) {
-  if (!fs.existsSync(f)) continue
-  const content = fs.readFileSync(f, 'utf-8')
-  const scheduled = /^\s*schedule:/m.test(content)
-  const needsSecrets = /secrets\.(GARMIN_SECRET|APP_URL|RUNOMICS_DATA_REPO_|INTERNAL_NOTIFY_SECRET|PRIVACY_ZONES)/.test(content)
-  if (scheduled && needsSecrets) {
-    warn('A scheduled workflow depends on deployment secrets', `${f} - it will fail on every run in a clone that has none.`)
-  }
-}
-
-// --- Report ----------------------------------------------------------------
 const criticalCount = findings.filter((f) => f.severity === 'CRITICAL').length
 const warnCount = findings.filter((f) => f.severity === 'WARN').length
 

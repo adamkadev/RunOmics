@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""Sync planned workouts from Garmin Connect to public/data/planned_workouts/.
-
-Fetches the calendar month-by-month to find scheduled running workouts, then
-enriches each with its workout detail. The Garmin-payload parsing (distance/
-duration estimation, step structure, main-set descriptor) lives in
-processing/garmin_workout.py - this module only decides which detail to fetch
-per calendar item and assembles/writes the final entries.
-
-Can be run standalone or imported by sync.py.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -22,7 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import httpx
+
 from garmin.client import GarminAPIError, GarminAuthError, GarminClient
+from garmin.retry import retry_transient
+from data_directory import get_data_dir
 from processing.garmin_workout import (
     build_workout_steps,
     collect_steps,
@@ -34,23 +27,24 @@ from processing.mapper import ActivityData
 from processing.planned_workout_type import (
     coach_type_word,
     infer_planned_type,
+    type_from_coaching_type,
     type_from_training_effect_label,
 )
 from repository.json_store import PlannedWorkoutStore
 
-_DATA_DIR = Path(__file__).parent.parent / "public" / "data"
 _RATE_LIMIT_PAUSE = 1.0
-_RETRY_PAUSE = 60.0
 _WINDOW_PAST_DAYS = 7
 _WINDOW_FUTURE_DAYS = 90
 _DEFAULT_SCHEDULED_TIME = "Evening"
 _SCHEDULED_TIME_BUCKETS = ("Night", "Morning", "Afternoon", "Evening")
 
 
+class _Unresolved(dict):
+    """A calendar item whose detail could not be fetched, reported rather than dropped so pruning cannot read the date as free."""
+
+
 def _bucket_scheduled_time(value: str) -> str:
-    """Coarsens an 'HH:MM' clock time to a time-of-day label, so the exact
-    minute a future run is scheduled is never persisted or served publicly.
-    Idempotent: an already-bucketed label passes through unchanged."""
+    """Coarsened so the exact minute a future run is scheduled is never persisted or served publicly."""
     if value in _SCHEDULED_TIME_BUCKETS:
         return value
     try:
@@ -65,14 +59,10 @@ def _bucket_scheduled_time(value: str) -> str:
         return "Evening"
     return "Night"
 
-# Slow end of the "easy" training zone as a multiplier of threshold pace -
-# mirrors ZONE_DEFS.easy.paceMultMax in src/application/usecases/GetTrainingZones.ts
-# (the app's own "training zone chart"), so footing/endurance distance
-# estimates line up with what the athlete sees there.
+# Mirrors ZONE_DEFS.easy.paceMultMax in src/application/usecases/GetTrainingZones.ts, so easy distance estimates
+# match the app's zone chart.
 _EASY_PACE_MULT_MAX = 1.46
-# Used only when the athlete's threshold pace isn't available - a generic
-# slow-easy/footing pace, in line with the 5:45-6:15/km range most runners
-# fall in for those sessions.
+# 6:15/km, a generic slow-easy pace for when the athlete's threshold pace isn't available.
 _DEFAULT_EASY_PACE_SEC_PER_KM = 375
 
 
@@ -98,7 +88,8 @@ def main() -> int:
             dist = f"{p['distanceM'] / 1000:.1f} km" if p.get("distanceM") else ""
             dur = f"{p['durationSecs'] // 60} min" if p.get("durationSecs") else ""
             extra = " · ".join(filter(None, [dist, dur]))
-            print(f"  {p['date']}  {p['name']}" + (f"  ({extra})" if extra else ""))
+            name = f"{p['name']} (detail unavailable)" if isinstance(p, _Unresolved) else p["name"]
+            print(f"  {p['date']}  {name}" + (f"  ({extra})" if extra else ""))
         return 0
 
     write_planned_workouts(planned, stale_candidates=stale_candidates)
@@ -110,39 +101,33 @@ def write_planned_workouts(
     store: PlannedWorkoutStore | None = None,
     stale_candidates: set[str] | None = None,
 ) -> PlannedWorkoutStore:
-    """Upsert this sync's fetch window into the durable per-year planned-workout
-    store, preserving manually-edited type/scheduledTime.
+    """`scheduledTime` and `type` cannot come from the Garmin API, so they are kept across syncs; `type` only while
+    the name at that date is unchanged, since otherwise the date holds a different session.
 
-    `scheduledTime`, and `type` for any workout Garmin doesn't label itself,
-    can't be derived from the calendar/workout API - so once a value is set
-    (manually, or by a prior sync's inference) it's kept across syncs even if
-    the Garmin-side distance/duration changes for the *same* workout. But
-    `type` is keyed off the workout name (see `infer_planned_type`), so it's
-    only carried over when the name at that date is unchanged - otherwise the
-    date just happens to hold a different session now (e.g. the plan was
-    reordered/edited upstream) and the old type would be plain wrong for it.
-
-    Unlike the old flat-file version, dates outside this sync's fetch window
-    are left untouched in the store rather than dropped - the store is a
-    growing history, not a rolling snapshot. But a date *inside* the window
-    whose calendar month fetched cleanly and which no longer yields a running
-    workout (rescheduled to another date, deleted, or turned into a rest day)
-    is pruned via `stale_candidates` - otherwise a rescheduled session leaves
-    a phantom entry on its old date forever (shown as a missed workout once
-    that date is past).
+    Stale candidates are pruned, or a rescheduled session would leave a phantom missed workout on its old date.
     """
     store = store if store is not None else PlannedWorkoutStore()
 
+    written = kept = 0
+    typed_at_source = {entry["date"] for entry in planned if entry.get("type")}
     for entry in planned:
+        if isinstance(entry, _Unresolved):
+            # What is on file is the last complete reading; a stub would stay so once the date leaves the window.
+            if store.get(entry["date"]) is not None:
+                kept += 1
+                continue
+            if not entry["name"]:
+                continue
+        written += 1
         prior = store.get(entry["date"]) or {}
-        # A `type` already on the entry came from Garmin's own training-effect
-        # label (Garmin Coach) - authoritative, so neither the prior value nor
-        # the name-based guess gets a say.
+        # A `type` already on the entry came from Garmin's label or the coaching plan, which no guess overrides.
         if not entry.get("type"):
             prior_type = prior.get("type") if prior.get("name") == entry["name"] else None
             entry["type"] = prior_type or infer_planned_type(entry["name"])
         entry["scheduledTime"] = _bucket_scheduled_time(prior.get("scheduledTime", _DEFAULT_SCHEDULED_TIME))
         store.upsert(entry)
+
+    reclassified = _reclassify_base_entries(store, keep=typed_at_source)
 
     pruned = 0
     for stale_date in stale_candidates or ():
@@ -151,11 +136,30 @@ def write_planned_workouts(
             pruned += 1
 
     store.save()
-    summary = f"  {len(planned)} planned workout(s) upserted ({store.count()} total in store)"
+    summary = f"  {written} planned workout(s) upserted ({store.count()} total in store)"
+    if kept:
+        summary += f", {kept} kept as stored (detail unavailable)"
+    if reclassified:
+        summary += f", {reclassified} re-typed from Base by name"
     if pruned:
         summary += f", {pruned} stale entr{'y' if pruned == 1 else 'ies'} removed"
     print(summary)
     return store
+
+
+def _reclassify_base_entries(store: PlannedWorkoutStore, keep: set[str] | frozenset[str] = frozenset()) -> int:
+    """Across the whole history: Base is also the fallback for a name the rules could not read, so it would stay for good.
+
+    `keep` holds the dates typed at the source - Garmin's own label or the coaching plan - which no name overrides."""
+    reclassified = 0
+    for entry in store.all_entries():
+        if entry.get("type") not in (None, "Base") or entry["date"] in keep:
+            continue
+        guessed = infer_planned_type(entry.get("name") or "")
+        if guessed != "Base":
+            store.upsert({**entry, "type": guessed})
+            reclassified += 1
+    return reclassified
 
 
 def prefer_planned_name(description: str, plan: dict) -> str | None:
@@ -166,10 +170,8 @@ def prefer_planned_name(description: str, plan: dict) -> str | None:
     if len(planned_name) > len(description) and planned_name.lower().startswith(description.lower()):
         return planned_name
 
-    # Garmin Coach titles a completed run "<City> - Base", which the mapper
-    # trims to "Base": a title that names the session type and nothing else.
-    # The plan for that same day, being that same type, is the only place its
-    # actual structure survives. A custom rename matches neither branch.
+    # Garmin Coach titles a run "<City> - Base", trimmed to "Base": the plan for that day is the only place its
+    # structure survives.
     described_type = coach_type_word(description)
     if described_type and described_type == plan.get("type"):
         return planned_name
@@ -178,9 +180,7 @@ def prefer_planned_name(description: str, plan: dict) -> str | None:
 
 
 def enrich_description_from_plan(activity: ActivityData, store: PlannedWorkoutStore) -> None:
-    """Mutates activity.description in place if the workout planned for
-    activity.date describes the session better than the name Garmin gave it -
-    so the detail survives permanently, independent of the store's window."""
+    """So the detail survives permanently, independent of the store's window."""
     plan = store.get(activity.date)
     if not plan:
         return
@@ -189,27 +189,81 @@ def enrich_description_from_plan(activity: ActivityData, store: PlannedWorkoutSt
         activity.description = better
 
 
-def _load_easy_pace_sec_per_km(data_dir: Path = _DATA_DIR) -> float:
-    """Slow-end easy/footing pace (sec/km), derived from the athlete's own
-    threshold pace when available, else a generic 6'15/km default."""
-    athlete_path = data_dir / "athlete.json"
+def _load_easy_pace_sec_per_km(data_dir: Path | None = None) -> float:
+    athlete_path = (data_dir or get_data_dir()) / "athlete.json"
     if athlete_path.exists():
         try:
-            threshold = json.loads(athlete_path.read_text()).get("thresholdPaceSecPerKm")
+            threshold = json.loads(athlete_path.read_text(encoding="utf-8")).get("thresholdPaceSecPerKm")
             if threshold:
                 return threshold * _EASY_PACE_MULT_MAX
-        except Exception:
-            pass
+        except Exception as exc:
+            # Only an estimate hangs on it and nothing here writes the file, so falling back is safe.
+            print(
+                f"  Warning: {athlete_path} could not be read ({type(exc).__name__}: {exc}); "
+                f"estimating distances at the default easy pace."
+            )
     return _DEFAULT_EASY_PACE_SEC_PER_KM
+
+
+def _pushed_prescriptions(data_dir: Path | None = None) -> dict[str, dict]:
+    coaching = (data_dir or get_data_dir()) / "coaching"
+    sync_path = coaching / "garmin-sync.json"
+    if not sync_path.exists():
+        return {}
+    entries = json.loads(sync_path.read_text(encoding="utf-8")).get("entries") or []
+    prescribed: dict[str, dict] = {}
+    for plan_path in [coaching / "current_plan.json", *sorted((coaching / "superseded").glob("*.json"))]:
+        if not plan_path.exists():
+            continue
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        for week in plan.get("weeks") or []:
+            for workout in week.get("workouts") or []:
+                if workout.get("id"):
+                    prescribed.setdefault(workout["id"], workout)
+
+    pushed: dict[str, dict] = {}
+    for entry in entries:
+        workout = prescribed.get(entry.get("prescriptionId") or "")
+        workout_id = str(entry.get("garminWorkoutId") or "")
+        if workout and workout_id:
+            pushed[workout_id] = workout
+    return pushed
+
+
+def _load_coach_workout_types(data_dir: Path | None = None) -> dict[str, str]:
+    """A session the plan pushed is typed by the plan, not guessed from the free-text title the planner wrote for it."""
+    try:
+        pushed = _pushed_prescriptions(data_dir)
+    except Exception as exc:
+        # Only the type hangs on it, and the name-based guess still stands.
+        print(
+            f"  Warning: the coaching plan could not be read ({type(exc).__name__}: {exc}); "
+            f"typing planned workouts from their names."
+        )
+        return {}
+
+    types: dict[str, str] = {}
+    for workout_id, workout in pushed.items():
+        activity_type = type_from_coaching_type(workout.get("type"))
+        if activity_type:
+            types[workout_id] = activity_type
+    return types
+
+
+def _load_coach_named_workouts(data_dir: Path | None = None) -> set[str]:
+    """A name the coach wrote under the naming rules (with a shortName) already states its main set."""
+    try:
+        pushed = _pushed_prescriptions(data_dir)
+    except Exception:
+        # _load_coach_workout_types has reported it already.
+        return set()
+    return {workout_id for workout_id, workout in pushed.items() if workout.get("shortName")}
 
 
 def fetch_planned_workouts(
     client: GarminClient, since: date | None = None, until: date | None = None
 ) -> tuple[list[dict], set[str]]:
-    """Returns the planned entries plus `stale_candidates`: dates inside the
-    fetch window, whose calendar month fetched successfully, that no longer
-    have a running workout - i.e. safe for `write_planned_workouts` to prune
-    from the store if it still holds an entry for them."""
+    """`stale_candidates` are dates in the window, in a month that fetched cleanly, with no running workout left."""
     today = date.today()
     start_date = since or today - timedelta(days=_WINDOW_PAST_DAYS)
     end_date = until or today + timedelta(days=_WINDOW_FUTURE_DAYS)
@@ -246,13 +300,7 @@ def _dates_in_months(
 def _collect_scheduled(
     client: GarminClient, start_date: date, end_date: date
 ) -> tuple[list[tuple[str, str, str, bool]], set[tuple[int, int]]]:
-    """Return (date, workoutId, fallbackTitle, isAdaptive) tuples from the
-    calendar for the given window, plus the set of (year, month) that fetched
-    successfully (used by the caller to know which dates are safe to prune a
-    stale store entry from). fallbackTitle is the calendar item's own name
-    - used when a workout's detail can't be fetched (see _build_entries).
-    isAdaptive marks Garmin Coach items, whose detail comes from a different
-    endpoint (see GarminClient.get_adaptive_workout_detail)."""
+    """(date, workoutId, fallbackTitle, isAdaptive) tuples, plus the (year, month) pairs that fetched successfully."""
     months: list[tuple[int, int]] = []
     cur = start_date.replace(day=1)
     while cur <= end_date:
@@ -262,19 +310,15 @@ def _collect_scheduled(
     seen: set[tuple[str, str]] = set()
     scheduled: list[tuple[str, str, str, bool]] = []
     fetched_months: set[tuple[int, int]] = set()
-    # Diagnostics only (don't affect filtering) - surfaces in the sync's Actions
-    # log why a calendar item was excluded, since e.g. Garmin Coach entries have
-    # been reported missing from the synced plan with no other visible cause.
+    # Diagnostics only: shows in the Actions log why a calendar item was excluded.
     item_type_counts: dict[str, int] = {}
     skipped_sports: list[str] = []
     skipped_no_workout_id = 0
 
     for year, month in months:
         try:
-            data = _retry_on_429(
-                lambda y=year, m=month: client.get_calendar_month(y, m)
-            )
-        except GarminAPIError as exc:
+            data = retry_transient(client.get_calendar_month, year, month)
+        except (GarminAPIError, httpx.HTTPError) as exc:
             print(f"  Warning: calendar {year}-{month:02d} failed: {exc}")
             continue
 
@@ -287,9 +331,7 @@ def _collect_scheduled(
                 item_type = item.get("itemType") or "(none)"
                 item_type_counts[item_type] = item_type_counts.get(item_type, 0) + 1
 
-            # Garmin Coach's adaptive training plans schedule "fbtAdaptiveWorkout"
-            # items (Firstbeat-driven adaptive coaching), alongside plain
-            # "workout" items used by manually-created/third-party-imported plans.
+            # Garmin Coach schedules "fbtAdaptiveWorkout" items; manual and third-party plans plain "workout" items.
             if item.get("itemType") not in ("workout", "fbtAdaptiveWorkout"):
                 continue
             if not sched_date or not in_window:
@@ -298,15 +340,13 @@ def _collect_scheduled(
             if sport and "running" not in sport:
                 skipped_sports.append(sport)
                 continue
-            # fbtAdaptiveWorkout items have no numeric workoutId - they carry a
-            # workoutUuid instead, resolved through the fbt-adaptive endpoint.
+            # fbtAdaptiveWorkout items carry a workoutUuid instead of a numeric workoutId.
             is_adaptive = item.get("itemType") == "fbtAdaptiveWorkout"
             workout_id = str(item.get("workoutId") or item.get("workoutUuid") or "")
             if not workout_id:
                 skipped_no_workout_id += 1
                 continue
-            # Garmin's calendar-service can list the same (date, workout) pair
-            # twice (month grids overlap at week boundaries) - dedupe here.
+            # Garmin's calendar lists a pair twice where month grids overlap at week boundaries.
             pair = (sched_date, workout_id)
             if pair not in seen:
                 seen.add(pair)
@@ -327,10 +367,11 @@ def _collect_scheduled(
 def _build_entries(
     client: GarminClient, scheduled: list[tuple[str, str, str, bool]]
 ) -> list[dict]:
-    """Fetch workout details and build the final entry list."""
     details_cache: dict[str, dict | None] = {}
     planned: list[dict] = []
     easy_pace = _load_easy_pace_sec_per_km()
+    coach_types = _load_coach_workout_types()
+    coach_named = _load_coach_named_workouts()
     resolve_distance_duration = {
         True: resolve_adaptive_distance_duration,
         False: resolve_manual_distance_duration,
@@ -343,30 +384,26 @@ def _build_entries(
                 else client.get_workout_detail
             )
             try:
-                details_cache[workout_id] = _retry_on_429(
-                    lambda wid=workout_id, f=fetch: f(wid)
-                )
+                details_cache[workout_id] = retry_transient(fetch, workout_id)
                 time.sleep(_RATE_LIMIT_PAUSE)
-            except GarminAPIError as exc:
+            except (GarminAPIError, httpx.HTTPError) as exc:
                 print(f"  Warning: workout {workout_id} detail failed: {exc}")
                 details_cache[workout_id] = None
 
         detail = details_cache[workout_id]
         if detail is None:
-            # No structured detail available - still show the session by
-            # name/date rather than dropping it entirely.
-            if fallback_title:
-                planned.append({"date": sched_date, "name": fallback_title})
+            # Reported by name and date, so the date is not mistaken for a free one.
+            planned.append(_Unresolved(date=sched_date, name=fallback_title))
             continue
 
-        # Garmin Coach schedules rest days as calendar items like any other
-        # session, but with no name, no sport and no steps - they're plan
-        # structure, not something to plan for.
+        # Garmin Coach schedules rest days as calendar items, with no name, sport or steps.
         if detail.get("restDay") or detail.get("workoutPhrase") == "FORCED_REST":
             continue
 
         name = (detail.get("workoutName") or fallback_title).strip()
-        if " + " in name:
+        # A name the coach wrote under the naming rules is kept as written: its "+ 6 strides" is part of it.
+        named_by_coach = workout_id in coach_named
+        if " + " in name and not named_by_coach:
             name = name.split(" + ", 1)[0].strip()
         if not name:
             continue
@@ -378,10 +415,7 @@ def _build_entries(
         steps = collect_steps(detail)
         dist_m, dur_s = resolve_distance_duration[is_adaptive](detail, steps, easy_pace)
 
-        # Open/continuous workouts (no structured steps at all, e.g. a plain
-        # "1h endurance" goal) sometimes have only one of distance/duration
-        # filled in by Garmin - derive the other from the athlete's easy pace,
-        # same fallback as the footing/endurance step case above.
+        # Garmin sometimes fills only one of distance/duration for a workout with no steps.
         if not steps:
             if dist_m is None and dur_s is not None:
                 dist_m = round(dur_s * 1000 / easy_pace)
@@ -398,27 +432,23 @@ def _build_entries(
         if workout_steps is not None:
             entry["steps"] = workout_steps
 
-        # Garmin Coach's adaptive workouts state their own training-effect
-        # target; that beats guessing the session type from a terse French
-        # name. Third-party plans (Kiprun etc.) carry no such label.
-        workout_type = type_from_training_effect_label(detail.get("trainingEffectLabel"))
+        # Garmin Coach's own training-effect target beats guessing from a terse French name; third-party plans carry
+        # no such label.
+        workout_type = type_from_training_effect_label(detail.get("trainingEffectLabel")) or coach_types.get(workout_id)
         if workout_type:
             entry["type"] = workout_type
 
-        # Garmin Coach names a session after its type and nothing else ("Base",
-        # "Seuil"), which every view already shows as a badge right next to the
-        # title - so its structure replaces the name outright ("3x8'@4:20").
-        # Third-party plans name their sessions properly and keep that name; a
-        # quality one just gains the main interval block. Base never gets a
-        # structure - an easy run has none worth surfacing, so the canonical
-        # word alone stays the name.
+        # Garmin Coach names a session after its type alone, already shown as a badge, so its structure replaces the
+        # name; a third-party name is kept, and an easy run has no structure worth surfacing.
         coach_type = coach_type_word(name)
         if coach_type and not workout_type:
-            # Once the type word leaves the name, the name-based guess
-            # write_planned_workouts falls back to can't recover it.
+            # Once the type word leaves the name, the name-based guess can't recover it.
             entry["type"] = coach_type
 
-        if coach_type == "Base":
+        if named_by_coach:
+            # It already states its main set; appending ours would say it twice.
+            pass
+        elif coach_type == "Base":
             entry["name"] = "Base"
         elif coach_type or (workout_type or infer_planned_type(name)) != "Base":
             main_set = main_set_descriptor(detail, name, workout_steps)
@@ -429,17 +459,6 @@ def _build_entries(
 
     planned.sort(key=lambda x: x["date"])
     return planned
-
-
-def _retry_on_429(fn):
-    try:
-        return fn()
-    except GarminAPIError as exc:
-        if exc.status_code != 429:
-            raise
-        print(f"  Rate limited, waiting {_RETRY_PAUSE}s…", flush=True)
-        time.sleep(_RETRY_PAUSE)
-        return fn()
 
 
 def _parse_args() -> argparse.Namespace:

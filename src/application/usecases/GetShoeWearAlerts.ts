@@ -8,8 +8,11 @@ export interface ShoeWearAlert {
   alertThresholdKm: number
 }
 
-// Returns [] on the very first call (nothing to compare against yet) - it just bootstraps the stored state.
-export async function getShoeWearAlerts(): Promise<ShoeWearAlert[]> {
+/**
+ * Nothing is stored until `commit()`: commit once the pushes are out, so a
+ * failed push is offered again next run.
+ */
+export async function getShoeWearAlerts(): Promise<{ newAlerts: ShoeWearAlert[]; commit: () => Promise<void> }> {
   const shoes = getShoeStats()
   const lastState = await getLastShoeWearState()
 
@@ -32,6 +35,5 @@ export async function getShoeWearAlerts(): Promise<ShoeWearAlert[]> {
     }
   }
 
-  await saveLastShoeWearState(nextState)
-  return newAlerts
+  return { newAlerts, commit: () => saveLastShoeWearState(nextState) }
 }

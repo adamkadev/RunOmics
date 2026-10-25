@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 test('shoes list renders and links into a detail page', async ({ page }) => {
   await page.goto('/shoes')
@@ -10,5 +10,7 @@ test('shoes list renders and links into a detail page', async ({ page }) => {
 
   await expect(page).toHaveURL(/\/shoes\/[^/]+$/)
   await expect(page.locator('h1')).toBeVisible()
-  await expect(page.getByText('Tracked Activities')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Shoes' })).toBeVisible()
+  // Titled for the pair's state, whichever pair the list happened to open.
+  await expect(page.getByText(/Recent runs|Last runs before retiring/)).toBeVisible()
 })

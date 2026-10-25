@@ -1,27 +1,19 @@
 import { cn } from '@/lib/utils'
 import type { ElementType, HTMLAttributes, ReactNode } from 'react'
 
-type PillVariant = 'active' | 'accent' | 'neutral' | 'highlight'
+/** `selected` is inverted ink, never the accent: the accent is for the athlete's own data and real actions. */
+type PillVariant = 'selected' | 'neutral' | 'onAura'
 
-// `highlight` carries its tint via className (semantic, semi-transparent).
-// Pills are rendered in long scrollable rows, so they stay solid - no
-// backdrop-filter (the blur budget is reserved for chrome + key cards).
-// `active`/`neutral` are the segmented-chip recipe (C2): a translucent,
-// foreground-tinted overlay so the chip reads as glass on top of a card
-// while still adapting automatically between light and dark.
-// `accent` is the stronger selection state used by the period selectors,
-// matching the tab strip: one filled chip carries the current scope.
 const VARIANT_CLASS: Record<PillVariant, string> = {
-  active:    'border border-foreground/[0.20] bg-foreground/[0.14] text-foreground font-semibold',
-  accent:    'border border-transparent bg-accent text-accent-foreground font-semibold shadow-sm',
-  neutral:   'border border-foreground/[0.12] bg-foreground/[0.06] text-foreground/60 hover:bg-foreground/[0.10]',
-  highlight: 'border font-semibold',
+  selected: 'bg-foreground px-4 text-background font-semibold',
+  neutral:  'bg-[var(--fill-3)] text-foreground font-medium',
+  // Unselected, straight on the background glow.
+  onAura:   'on-aura text-foreground font-medium',
 }
 
 interface PillProps extends HTMLAttributes<HTMLElement> {
   variant?: PillVariant
   as?: ElementType
-  /** Type pastille: a small colored dot before the label. */
   dotColor?: string
 }
 
@@ -33,10 +25,13 @@ export function Pill({
   children,
   ...rest
 }: PillProps) {
+  // A plain span is a label; a hit area would only steal taps from its neighbours.
+  const interactive = Tag !== 'span' || rest.onClick !== undefined
   return (
     <Tag
       className={cn(
-        'inline-flex flex-none items-center gap-1.5 rounded-full px-3.5 py-[7px] text-xs font-medium',
+        'inline-flex h-9 flex-none items-center gap-1.5 rounded-full px-3.5 text-[15px] tracking-[-0.015rem]',
+        interactive && 'hit-44',
         'whitespace-nowrap transition-transform active:scale-95',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
         VARIANT_CLASS[variant],
@@ -46,7 +41,7 @@ export function Pill({
     >
       {dotColor && (
         <span
-          className="h-1.5 w-1.5 shrink-0 rounded-full"
+          className="h-[7px] w-[7px] shrink-0 rounded-full"
           style={{ backgroundColor: dotColor }}
           aria-hidden="true"
         />

@@ -1,45 +1,50 @@
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { round } from '@/lib/math'
+import { isLongRun } from '@/domain/activity/longRun'
+import { addDays, appTodayIso, isoDate, startOfWeek } from '@/lib/calendarDate'
 
 export type HeatmapDay = {
-  date: string       // YYYY-MM-DD, empty string = padding
+  date: string
   distanceKm: number
   sessionCount: number
+  longRun: boolean
+  /** The day's longest run. */
+  activityId: string | null
 }
 
 export function getHeatmapData(): HeatmapDay[] {
   const activities = getAllActivities()
 
-  const map = new Map<string, { distanceKm: number; sessionCount: number }>()
+  const map = new Map<string, { distanceKm: number; sessionCount: number; longRun: boolean; activityId: string; longestKm: number }>()
   for (const a of activities) {
     const date = a.date.slice(0, 10)
-    const entry = map.get(date) ?? { distanceKm: 0, sessionCount: 0 }
+    const entry = map.get(date)
+    const longest = !entry || a.distanceKm > entry.longestKm
     map.set(date, {
-      distanceKm: entry.distanceKm + a.distanceKm,
-      sessionCount: entry.sessionCount + 1,
+      distanceKm: (entry?.distanceKm ?? 0) + a.distanceKm,
+      sessionCount: (entry?.sessionCount ?? 0) + 1,
+      longRun: (entry?.longRun ?? false) || isLongRun(a),
+      activityId: longest ? a.id : entry!.activityId,
+      longestKm: longest ? a.distanceKm : entry!.longestKm,
     })
   }
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
-  const from = new Date(today)
-  from.setDate(from.getDate() - 364)
-  const dayOfWeek = from.getDay() // 0=Sun … 6=Sat
-  const offsetToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
-  from.setDate(from.getDate() + offsetToMonday)
+  // Local dates throughout: toISOString on a local midnight names the day
+  // before east of UTC.
+  const today = new Date(`${appTodayIso()}T00:00:00`)
+  const from = startOfWeek(addDays(today, -364))
 
   const days: HeatmapDay[] = []
-  const cursor = new Date(from)
-  while (cursor <= today) {
-    const date = cursor.toISOString().slice(0, 10)
+  for (let cursor = from; cursor <= today; cursor = addDays(cursor, 1)) {
+    const date = isoDate(cursor)
     const data = map.get(date)
     days.push({
       date,
       distanceKm: round(data?.distanceKm ?? 0),
       sessionCount: data?.sessionCount ?? 0,
+      longRun: data?.longRun ?? false,
+      activityId: data?.activityId ?? null,
     })
-    cursor.setDate(cursor.getDate() + 1)
   }
 
   return days

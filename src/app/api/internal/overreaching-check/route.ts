@@ -1,19 +1,25 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { handleInternalRoute } from '@/lib/internalRoute'
-import { sendPushToAllDevices } from '@/lib/sendPushNotification'
+import { sendPushes } from '@/lib/sendPushNotification'
 import { getOverreachingAlerts } from '@/application/usecases/GetOverreachingAlerts'
+import { formatNumber } from '@/lib/formatters'
+import { t } from '@/i18n'
+import { loadData } from '@/application/usecases/LoadData'
 
 export async function POST(req: NextRequest) {
   return handleInternalRoute('overreaching-check', req, async () => {
-    const newAlerts = await getOverreachingAlerts()
+    await loadData()
+    const { newAlerts, commit } = await getOverreachingAlerts()
 
-    for (const alert of newAlerts) {
-      const acwrPart = alert.acwr !== null ? `, ACWR ${alert.acwr}` : ''
-      await sendPushToAllDevices(
-        'Overreaching risk detected',
-        `Form (TSB) ${alert.tsb}${acwrPart} - high training risk, consider recovery.`
-      )
-    }
+    // Stored only once the warning went out, so a failed push stays armed.
+    await sendPushes(
+      'training',
+      newAlerts.map((alert) => ({
+        title: t.notifications.overreaching.title,
+        body: t.notifications.overreaching.body(formatNumber(alert.tsb), alert.acwr !== null ? formatNumber(alert.acwr, 2) : null),
+      }))
+    )
+    await commit()
 
     return NextResponse.json({ newAlerts })
   })

@@ -1,53 +1,41 @@
+import 'server-only'
 import type { Limits } from '@/domain/ai/prompt'
 import { activeLocale } from '@/i18n'
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
-// Exported because the spender has to reserve this much room before it lets a
-// call start: a generation that begins inside the run budget but runs its full
-// timeout is what pushes the whole invocation past the serverless ceiling.
-// Even at generationConfig.thinkingConfig.thinkingLevel: 'low' below, a
-// schema-constrained French answer measured 23s live (360 thinking tokens) -
-// 15s was aborting calls that would have succeeded a few seconds later.
-export const CALL_TIMEOUT_MS = 30_000
+/** 3.8 Flash thinks long even at 'low'; 45 s still leaves a 280 s pass room for a fallback model after a timeout. */
+export const CALL_TIMEOUT_MS = 45_000
 
-// Some models drop French typography under constrained JSON output - seen in
-// the wild from gemini-3.5-flash-lite. Both checks reject rather than repair:
-// a rejected candidate just stays in the backfill queue for the next pass.
-//
-// A dropped elision ("L effort" instead of "L'effort") is unambiguous - these
-// function words always contract before a vowel, so the miss is easy to spot.
 const FRENCH_ELISION_MISSING = /\b(?:[LldDsScCnNjJtTmM]|[Qq]ue)\s+(?=[aeiouyàâäéèêëïîôöùûühAEIOUYÀÂÄÉÈÊËÏÎÔÖÙÛÜH])/
-// Accent restoration is not - "seance"/"séance" can't be told apart by regex -
-// but French this long virtually always contains at least one accented letter
-// (séance, récupération, développement...), so a total absence is a strong
-// signal the model dropped diacritics rather than a genuinely accent-free
-// sentence.
 const FRENCH_ACCENT = /[àâäéèêëïîôöùûüçÀÂÄÉÈÊËÏÎÔÖÙÛÜÇ]/
 const FRENCH_ACCENT_CHECK_MIN_LENGTH = 40
 
 export interface Insight {
   headline: string
   body: string
-  /** One line per read the surface asked for, in the order it listed them. */
   bullets?: string[]
 }
 
 export interface InsightRequest {
-  /** Per-surface: free-tier quotas are counted per model, see the callers. */
   model: string
   systemInstruction: string
   prompt: string
   limits: Limits
-  /** Number of reads the model must phrase; omit for headline + body only. */
   bulletCount?: number
 }
 
-/**
- * Failures are reported rather than swallowed: this runs unattended from a
- * GitHub Actions cron, where a silent null looks identical whether the quota
- * ran out, the model was retired or the copy came back too long.
- */
 export type InsightResult = { ok: true; insight: Insight } | { ok: false; reason: string }
+
+export type StructuredResult<T> = { ok: true; value: T } | { ok: false; reason: string }
+
+export interface StructuredRequest {
+  apiKey: string
+  model: string
+  systemInstruction: string
+  prompt: string
+  responseSchema: Record<string, unknown>
+  temperature?: number
+}
 
 function responseSchema(bulletCount: number | undefined) {
   const headlineAndBody = {
@@ -123,47 +111,107 @@ function parseInsight(raw: unknown, limits: Limits, bulletCount?: number): Insig
   return { ok: true, insight: parsedBullets ? { ...insight, bullets: parsedBullets.bullets } : insight }
 }
 
+/**
+ * No retries: the insight pass reserves one request of a model's daily budget
+ * (20 on the flash tier) and walks a model pool, so the pool is the retry.
+ */
 export async function generateInsight(request: InsightRequest): Promise<InsightResult> {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) return { ok: false, reason: 'no api key' }
 
-  // The model is whatever the spender reserved budget for - overriding it here
-  // would bill one model's ledger for another model's call. The GEMINI_MODEL
-  // escape hatch lives in lib/aiSpend, where it replaces the pool instead.
+  const result = await generateStructuredJson({
+    apiKey,
+    model: request.model,
+    systemInstruction: request.systemInstruction,
+    prompt: request.prompt,
+    responseSchema: responseSchema(request.bulletCount),
+    temperature: 1.1,
+  }, wait, 0)
+  if (!result.ok) return result
+
+  try {
+    return parseInsight(result.value, request.limits, request.bulletCount)
+  } catch (error) {
+    return { ok: false, reason: `parse error: ${String(error).slice(0, 120)}` }
+  }
+}
+
+/** Google answers roughly one valid call in six with 503 "high demand", so a single attempt fails on a coin toss. */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+const RETRY_DELAYS_MS = [1_000, 4_000]
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+export async function generateStructuredJson(
+  request: StructuredRequest,
+  sleep: (ms: number) => Promise<unknown> = wait,
+  retries = RETRY_DELAYS_MS.length,
+): Promise<StructuredResult<unknown>> {
+  for (let attempt = 0; ; attempt++) {
+    const { result, retryable } = await attemptStructuredJson(request)
+    if (result.ok || !retryable || attempt >= retries) return result
+
+    await sleep(RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]!)
+  }
+}
+
+/** `retryable` stays out of StructuredResult: it is the loop's business, not the caller's. */
+interface Attempt {
+  result: StructuredResult<unknown>
+  retryable: boolean
+}
+
+/** "gemini-3.8-flash" is 3.8, "gemini-3-flash-preview" 3.0; null for a name that carries none. */
+function modelVersion(model: string): { major: number; minor: number } | null {
+  const version = model.match(/^gemini-(\d+)(?:\.(\d+))?-/)
+  return version ? { major: Number(version[1]), minor: Number(version[2] ?? 0) } : null
+}
+
+/** Gemini 3.8 Flash and later deprecate sampling settings (temperature, top_p, top_k). */
+export function takesTemperature(model: string): boolean {
+  const version = modelVersion(model)
+  if (!version) return true
+  return version.major < 3 || (version.major === 3 && version.minor < 8)
+}
+
+async function attemptStructuredJson(request: StructuredRequest): Promise<Attempt> {
   try {
     const res = await fetch(`${ENDPOINT}/${request.model}:generateContent`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': request.apiKey },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: request.systemInstruction }] },
         contents: [{ parts: [{ text: request.prompt }] }],
         generationConfig: {
           responseMimeType: 'application/json',
-          responseSchema: responseSchema(request.bulletCount),
-          temperature: 1.1,
-          // Gemini 3.x has no way to turn thinking off (2.5's thinkingBudget: 0
-          // does not apply to this family) - 'low' is the floor, and it still
-          // spends real tokens on a schema-constrained answer. See
-          // CALL_TIMEOUT_MS for why the timeout still has headroom above it.
+          responseSchema: request.responseSchema,
+          ...(takesTemperature(request.model) ? { temperature: request.temperature ?? 0.4 } : {}),
+          // Gemini 3 is set by level, 'low' its floor.
           thinkingConfig: { thinkingLevel: 'low' },
         },
       }),
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     })
 
-    if (!res.ok) return { ok: false, reason: `http ${res.status}: ${(await res.text()).slice(0, 200)}` }
+    if (!res.ok) {
+      return {
+        result: { ok: false, reason: `http ${res.status}: ${(await res.text()).slice(0, 200)}` },
+        retryable: RETRYABLE_STATUS.has(res.status),
+      }
+    }
 
     const json = await res.json()
-    // Thinking models put reasoning parts alongside the answer, and not always
-    // last, so take the first part that actually carries text.
     const parts: { text?: unknown }[] = json?.candidates?.[0]?.content?.parts ?? []
     const text = parts.find((part) => typeof part.text === 'string')?.text
     if (typeof text !== 'string') {
-      return { ok: false, reason: `no text part (finish: ${json?.candidates?.[0]?.finishReason ?? 'none'})` }
+      const finish = json?.candidates?.[0]?.finishReason ?? 'none'
+      return { result: { ok: false, reason: `no text part (finish: ${finish})` }, retryable: false }
     }
 
-    return parseInsight(JSON.parse(text), request.limits, request.bulletCount)
+    return { result: { ok: true, value: JSON.parse(text) as unknown }, retryable: false }
   } catch (error) {
-    return { ok: false, reason: `${error instanceof Error ? error.name : 'error'}: ${String(error).slice(0, 120)}` }
+    // A timeout or a dropped connection is the same kind of luck as a 503.
+    const reason = `${error instanceof Error ? error.name : 'error'}: ${String(error).slice(0, 120)}`
+    return { result: { ok: false, reason }, retryable: true }
   }
 }

@@ -1,11 +1,15 @@
 import fs from 'node:fs'
-import { defineConfig } from '@playwright/test'
+import { defineConfig, devices } from '@playwright/test'
 
 const PROVISIONED_CHROMIUM = '/opt/pw-browsers/chromium'
 const executablePath =
   process.env.PLAYWRIGHT_CHROMIUM_PATH ??
   (fs.existsSync(PROVISIONED_CHROMIUM) ? PROVISIONED_CHROMIUM : undefined)
 const baseURL = process.env.SCREENSHOT_BASE_URL ?? 'http://127.0.0.1:3100'
+
+// The app is an iPhone PWA run from the home screen, so the viewport is the phone's whole screen.
+const phone = devices['iPhone 16 Pro']
+const PHONE_SCREEN = { width: 402, height: 874 }
 
 export default defineConfig({
   testDir: './screenshots',
@@ -16,10 +20,12 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: './screenshots/.pw-artifacts',
   use: {
+    ...phone,
     baseURL,
+    viewport: PHONE_SCREEN,
+    deviceScaleFactor: 2,
+    defaultBrowserType: 'chromium',
     browserName: 'chromium',
-    viewport: { width: 1440, height: 1000 },
-    deviceScaleFactor: 1,
     colorScheme: 'dark',
     locale: 'en-US',
     launchOptions: { executablePath },

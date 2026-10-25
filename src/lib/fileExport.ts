@@ -1,11 +1,7 @@
-/** Hands a generated file to the user.
- *
- * iOS PWAs (standalone mode) have no downloads UI - a blob download either
- * fails silently or opens an awkward preview - so there the native share
- * sheet is used instead (Save to Files, AirDrop, Mail...). Everywhere else
- * a regular download is triggered.
- */
-export async function saveFileWithFallback(file: File): Promise<void> {
+/** `cancelled`: the athlete closed the share sheet without saving. */
+export type SaveOutcome = 'shared' | 'downloaded' | 'cancelled'
+
+export async function saveFileWithFallback(file: File): Promise<SaveOutcome> {
   const isIosPwa =
     /iPhone|iPad/.test(navigator.userAgent) &&
     'standalone' in navigator &&
@@ -13,10 +9,10 @@ export async function saveFileWithFallback(file: File): Promise<void> {
   if (isIosPwa && navigator.canShare?.({ files: [file] })) {
     try {
       await navigator.share({ files: [file] })
-      return
+      return 'shared'
     } catch (err) {
       if ((err as Error).name !== 'AbortError') console.error(err)
-      else return // user closed the share sheet: don't also download
+      else return 'cancelled'
     }
   }
 
@@ -28,4 +24,5 @@ export async function saveFileWithFallback(file: File): Promise<void> {
   a.click()
   document.body.removeChild(a)
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return 'downloaded'
 }

@@ -1,83 +1,41 @@
 'use client'
 
+import { useState } from 'react'
 import Link from 'next/link'
+import { ChevronRight } from 'lucide-react'
 import { useRouter } from 'next/navigation'
-import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import dynamic from 'next/dynamic'
 import type { SimilarRun, SimilarRunsData } from '@/application/usecases/GetSimilarRuns'
-import { GlassSurface } from '@/components/ui/GlassSurface'
+import type { SimilarRunPoint } from './SimilarRunsChart'
+import { cardClass } from '@/components/ui/Card'
 import { ChartFigure } from '@/components/ui/ChartFigure'
-import { TooltipCard } from '@/components/ui/ChartTooltip'
-import { CHART_COLORS } from '@/lib/colors'
-import { formatClock, formatDateWithYear, formatDurationShort, formatPace } from '@/lib/formatters'
+import { Medal } from 'lucide-react'
+import { formatDate, formatDuration, formatPace } from '@/lib/formatters'
 import { cn } from '@/lib/utils'
 import { t } from '@/i18n'
 
 const LIST_MAX_ROWS = 4
 
-interface ChartPoint {
-  id: string
-  label: string
-  pace: number
-  isCurrent: boolean
-}
+const loadChart = () => import('./SimilarRunsChart')
+/** The chart's code waits for the card to open; the empty box keeps the list from jumping. */
+const SimilarRunsChart = dynamic(() => loadChart().then((m) => m.SimilarRunsChart), { loading: () => <div className="h-[120px]" /> })
 
-interface TooltipProps {
-  active?: boolean
-  payload?: Array<{ payload: ChartPoint }>
-}
-
-function CustomTooltip({ active, payload }: TooltipProps) {
-  const p = payload?.[0]?.payload
-  if (!active || !p) return null
-  return (
-    <TooltipCard label={p.label}>
-      <p className="text-sm" style={{ color: CHART_COLORS.pace }}>
-        {formatPace(p.pace)}
-      </p>
-    </TooltipCard>
-  )
-}
-
-interface DotProps {
-  cx?: number
-  cy?: number
-  payload?: ChartPoint
-  onSelect?: (id: string) => void
-}
-
-// The run being viewed gets a filled, larger dot so it's findable in the trend.
-// Every other dot is a shortcut to that run's own activity page.
-function RunDot({ cx, cy, payload, onSelect }: DotProps) {
-  if (cx === undefined || cy === undefined || !payload) return null
-  const { isCurrent, id } = payload
-  return (
-    <circle
-      cx={cx}
-      cy={cy}
-      r={isCurrent ? 5.5 : 3.5}
-      fill={isCurrent ? CHART_COLORS.pace : 'var(--card)'}
-      stroke={CHART_COLORS.pace}
-      strokeWidth={2}
-      onClick={isCurrent ? undefined : () => onSelect?.(id)}
-      style={isCurrent ? undefined : { cursor: 'pointer' }}
-    />
-  )
-}
-
+// Ranked by pace, so the bold number is the pace; the total time is secondary.
 function RunRow({ run, bestPace }: { run: SimilarRun; bestPace: number }) {
   const s = t.activity.similarRuns
   const deltaSec = Math.round(run.paceSecPerKm - bestPace)
 
   const content = (
     <>
-      <span className="w-6 shrink-0 text-center text-xs font-bold tabular-nums text-muted-foreground">
-        {run.rank === 1 ? '🥇' : `#${run.rank}`}
+      <span className="flex w-6 shrink-0 items-center justify-center text-xs font-bold tabular-nums text-muted-foreground">
+        {run.rank === 1 ? <Medal size={14} strokeWidth={2.2} role="img" aria-label={s.fastest} /> : `#${run.rank}`}
       </span>
       <span className={cn('min-w-0 flex-1 truncate text-sm', run.isCurrent ? 'font-semibold text-foreground' : 'text-foreground/80')}>
-        {run.isCurrent ? s.thisRun : formatDateWithYear(run.date)}
+        {run.isCurrent ? s.thisRun : formatDate(run.date, { year: 'always' })}
       </span>
-      <span className="text-sm font-semibold tabular-nums text-foreground">
-        {formatDurationShort(run.durationSeconds)}
+      <span className="flex flex-col items-end leading-tight">
+        <span className="text-sm font-semibold tabular-nums text-foreground">{formatPace(run.paceSecPerKm)}</span>
+        <span className="text-caption tabular-nums text-subtle">{formatDuration(run.durationSeconds)}</span>
       </span>
       <span className="w-16 shrink-0 text-right text-xs tabular-nums text-subtle">
         {deltaSec <= 0 ? s.record : s.paceDelta(deltaSec)}
@@ -86,14 +44,14 @@ function RunRow({ run, bestPace }: { run: SimilarRun; bestPace: number }) {
   )
 
   if (run.isCurrent) {
-    return <li className="flex items-center gap-2.5 rounded-control bg-accent-subtle px-2 py-1.5">{content}</li>
+    return <li className="flex items-center gap-2.5 rounded-control bg-[var(--surface-2)] px-2 py-1.5">{content}</li>
   }
 
   return (
     <li>
       <Link
         href={`/activities/${run.id}`}
-        className="flex items-center gap-2.5 rounded-control px-2 py-1.5 transition-colors hover:bg-foreground/[0.04]"
+        className="flex min-h-11 items-center gap-2.5 rounded-control px-2 py-1.5 transition-colors hover:bg-[var(--surface-2)]"
       >
         {content}
       </Link>
@@ -104,11 +62,13 @@ function RunRow({ run, bestPace }: { run: SimilarRun; bestPace: number }) {
 export function SimilarRuns({ data }: { data: SimilarRunsData }) {
   const s = t.activity.similarRuns
   const router = useRouter()
+  const [open, setOpen] = useState(false)
   const bestPaceLabel = formatPace(data.bestPaceSecPerKm)
 
-  const chartData: ChartPoint[] = data.runs.map((run) => ({
+  const chartData: SimilarRunPoint[] = data.runs.map((run) => ({
     id: run.id,
-    label: formatDateWithYear(run.date),
+    // An 11px axis tick has no room for a weekday.
+    label: formatDate(run.date, { style: 'bare', year: 'always' }),
     pace: run.paceSecPerKm,
     isCurrent: run.isCurrent,
   }))
@@ -119,56 +79,47 @@ export function SimilarRuns({ data }: { data: SimilarRunsData }) {
     listed[listed.length - 1] = byRank.find((run) => run.isCurrent)!
   }
 
+  const current = data.runs.find((run) => run.isCurrent)
+  const deltaSec = current ? Math.round(current.paceSecPerKm - data.bestPaceSecPerKm) : 0
+
+  // Folded to one row, so other runs never come ahead of this one on Overview.
   return (
-    <GlassSurface variant="card" className="p-5">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-foreground/80">
-          {s.title}
-        </h3>
-        <span className="rounded-full bg-accent-subtle px-2.5 py-0.5 text-xs font-semibold text-accent-text">
-          {s.timesBadge(data.count)}
+    <section className={cardClass({ padding: 'none' })}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        onPointerDown={() => void loadChart()}
+        aria-expanded={open}
+        className="flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left"
+      >
+        <span className="min-w-0">
+          <span className="block text-[15px] font-semibold text-foreground">{s.rowTitle(data.currentRank, data.count)}</span>
+          <span className="block text-xs text-muted-foreground">
+            {deltaSec <= 0 ? s.rowBest : s.rowDelta(deltaSec)}
+          </span>
         </span>
-      </div>
+        <ChevronRight
+          size={16}
+          aria-hidden="true"
+          className={cn('shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
+        />
+      </button>
 
-      <p className="mb-3 text-sm text-muted-foreground">{s.summary(data.count, data.currentRank)}</p>
+      {open && (
+        <div className="border-t border-border px-5 pb-[18px] pt-3">
+          <p className="mb-3 text-sm text-muted-foreground">{s.summary(data.count, data.currentRank)}</p>
 
-      <ChartFigure summary={s.chartSummary(data.count, bestPaceLabel)}>
-        <ResponsiveContainer width="100%" height={120}>
-          <LineChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -4 }}>
-            <XAxis
-              dataKey="label"
-              tick={{ fontSize: 11, fill: CHART_COLORS.axisTick }}
-              axisLine={false}
-              tickLine={false}
-              minTickGap={40}
-            />
-            <YAxis
-              tick={{ fontSize: 11, fill: CHART_COLORS.axisTick }}
-              axisLine={false}
-              tickLine={false}
-              domain={['dataMin - 5', 'dataMax + 5']}
-              tickFormatter={formatClock}
-              width={46}
-            />
-            <Tooltip content={<CustomTooltip />} cursor={{ stroke: CHART_COLORS.tooltipCursor }} />
-            <Line
-              type="monotone"
-              dataKey="pace"
-              stroke={CHART_COLORS.pace}
-              strokeWidth={2.5}
-              dot={<RunDot onSelect={(id) => router.push(`/activities/${id}`)} />}
-              isAnimationActive={false}
-            />
-            <ReferenceLine y={data.bestPaceSecPerKm} stroke={CHART_COLORS.referenceTarget} strokeDasharray="3 4" />
-          </LineChart>
-        </ResponsiveContainer>
-      </ChartFigure>
+          <ChartFigure summary={s.chartSummary(data.count, bestPaceLabel)}>
+            <SimilarRunsChart data={chartData} bestPace={data.bestPaceSecPerKm} onSelect={(id) => router.push(`/activities/${id}`)} />
+          </ChartFigure>
 
-      <ul className="mt-3 space-y-0.5 border-t border-border pt-3">
-        {listed.map((run) => (
-          <RunRow key={run.id} run={run} bestPace={data.bestPaceSecPerKm} />
-        ))}
-      </ul>
-    </GlassSurface>
+          <ul className="mt-3 space-y-0.5 border-t border-border pt-3">
+            {listed.map((run) => (
+              <RunRow key={run.id} run={run} bestPace={data.bestPaceSecPerKm} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   )
 }

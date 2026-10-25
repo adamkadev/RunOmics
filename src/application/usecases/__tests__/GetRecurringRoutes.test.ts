@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { clusterByRoute } from '../GetRecurringRoutes'
+import { clusterByRoute, farthestPoint } from '../GetRecurringRoutes'
 import type { Activity } from '@/domain/activity/types'
 
-/** A straight west-east trace of `cells` tiles, offset north by `lane` tiles. */
 const trace = (cells: number, lane = 0) =>
-  Array.from({ length: cells }, (_, i): [number, number] => [-150.0 + i * 0.001, 0.0 + lane * 0.001])
+  Array.from({ length: cells }, (_, i): [number, number] => [6.1 + i * 0.001, 49.6 + lane * 0.001])
 
 const run = (route: [number, number][], distanceKm: number, id = 'a'): Activity =>
   ({ id, date: '2026-07-20T08:00:00', route, distanceKm, paceSecPerKm: 300 }) as Activity
@@ -43,5 +42,23 @@ describe('clusterByRoute', () => {
     ])
 
     expect(clusters[0]?.runs).toHaveLength(3)
+  })
+})
+
+describe('farthestPoint', () => {
+  it('finds the turnaround of an out-and-back', () => {
+    const out: [number, number][] = [[6.1, 49.6], [6.11, 49.6], [6.12, 49.6], [6.11, 49.6], [6.1, 49.6]]
+    expect(farthestPoint(out)).toEqual([6.12, 49.6])
+  })
+
+  it('counts east-west and north-south alike', () => {
+    // At 49.6°N a degree of longitude is about two thirds of a degree of
+    // latitude, so the shorter-looking northward leg is the farther one.
+    const loop: [number, number][] = [[6.1, 49.6], [6.113, 49.6], [6.1, 49.61]]
+    expect(farthestPoint(loop)).toEqual([6.1, 49.61])
+  })
+
+  it('has nothing to name without a route', () => {
+    expect(farthestPoint([])).toBeNull()
   })
 })

@@ -1,36 +1,17 @@
-import { t } from '@/i18n'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import type { Activity, ActivityType, ActivityWeather } from '@/domain/activity/types'
 import { heatAdjustedEf } from '@/domain/activity/heat'
 import { easyHardShare } from '@/domain/training/easyHard'
 import { sumDistanceKm } from '@/domain/activity/distance'
-import { monthLabel } from '@/lib/formatters'
 import { round } from '@/lib/math'
+import { DAY_MS, isoDate } from '@/lib/calendarDate'
+import { qualityKind } from '@/domain/training/qualitySession'
+import { DEFAULT_Z4_FLOOR_BPM, repPaceSecPerKm } from '@/domain/training/repPace'
+import { getAthleteProfile } from '@/infrastructure/repositories/JsonAthleteRepository'
 
 export { easyHardShare }
 
 const EASY_TYPES: ActivityType[] = ['Base']
-
-export interface MonthlyVolume {
-  month: string
-  label: string
-  sessionCount: number
-  totalKm: number
-  byType: Partial<Record<ActivityType, number>>
-}
-
-export interface MonthlyLongRuns {
-  month: string
-  label: string
-  longestKm: number
-}
-
-export interface MonthlyEasyHard {
-  month: string
-  label: string
-  easyPct: number | null
-  hardPct: number | null
-}
 
 export interface ZoneShare {
   zone: number
@@ -38,12 +19,10 @@ export interface ZoneShare {
   percent: number
 }
 
+/** What the Analytics cards draw, a week at a time: it crosses to the browser, so a field nothing draws is not here. */
 export interface WeeklyTrendPoint {
   date: string
-  label: string
-  /** Everything run that week. Summed, not averaged like the reads below it. */
   distanceKm: number
-  sessionCount: number
   easyPace: number | null
   hardPace: number | null
   ef: number | null
@@ -57,9 +36,11 @@ export interface WeeklyTrendPoint {
   verticalRatioPct: number | null
   strideLengthM: number | null
   avgRpe: number | null
-  aer: number | null
-  ana: number | null
   zoneSeconds: Record<number, number>
+  longestKm: number
+  longestDate: string | null
+  thresholdSessions: number
+  intervalSessions: number
 }
 
 export interface DistanceBracket {
@@ -78,48 +59,8 @@ export interface YearTotals {
   caloriesPerWeek: number
 }
 
-export interface AnalyticsSeries {
-  monthlyVolume: MonthlyVolume[]
-  longRuns: MonthlyLongRuns[]
-  easyHardSplit: MonthlyEasyHard[]
-  distanceDistribution: DistanceBracket[]
-  typesPresent: ActivityType[]
-}
-
-export interface YearAnalytics extends AnalyticsSeries {
-  year: number
-  totals: YearTotals
-}
-
-export interface AllTimeAnalytics extends AnalyticsSeries {
-  totals: YearTotals
-}
-
-export interface DailyEfficiency {
-  date: string
-  label: string
-  ef7: number | null    // 7-day rolling average
-  ef30: number | null   // 30-day rolling average
-}
-
-export interface DailyRunningDynamics {
-  date: string
-  label: string
-  cadence7: number | null
-  cadence30: number | null
-  groundContact7: number | null
-  groundContact30: number | null
-  verticalOscillation7: number | null
-  verticalOscillation30: number | null
-}
-
 export interface AnalyticsPageData {
-  years: number[]
-  byYear: Record<number, YearAnalytics>
   weeklyTrends: WeeklyTrendPoint[]
-  efficiencyDaily: DailyEfficiency[]
-  runningDynamicsDaily: DailyRunningDynamics[]
-  allTime: AllTimeAnalytics
 }
 
 export function weightedAvg(
@@ -146,6 +87,7 @@ export function avgField(activities: Activity[], pick: (a: Activity) => number |
 }
 
 const weightedPace = (acts: Activity[]) => weightedAvg(acts, (a) => a.paceSecPerKm, (a) => a.distanceKm, 0)
+
 const weightedHr = (acts: Activity[]) => weightedAvg(acts, (a) => a.avgHeartRate, (a) => a.durationSeconds, 0)
 const weightedCadence = (acts: Activity[]) => weightedAvg(acts, (a) => a.cadenceSpm, (a) => a.durationSeconds)
 const weightedGroundContact = (acts: Activity[]) => weightedAvg(acts, (a) => a.groundContactMs, (a) => a.durationSeconds, 0)
@@ -171,12 +113,10 @@ export function zoneDistribution(activities: Activity[]): ZoneShare[] {
     }))
 }
 
-
 export function recentZoneDistribution(activities: Activity[], days: number, now: Date = new Date()): ZoneShare[] {
-  const cutoff = new Date(now.getTime() - days * 86_400_000)
+  const cutoff = new Date(now.getTime() - days * DAY_MS)
   return zoneDistribution(activities.filter((a) => new Date(a.date + 'T00:00:00') >= cutoff))
 }
-
 
 function efSamples(activities: Activity[]): { ef: number; weather: ActivityWeather | null }[] {
   return activities
@@ -197,12 +137,13 @@ export function adjustedEfficiencyFactor(activities: Activity[]): number | null 
 }
 
 const DISTANCE_BRACKETS = [
-  { label: '< 5 km',   min: 0,  max: 5  },
-  { label: '5–10 km',  min: 5,  max: 10 },
-  { label: '10–15 km', min: 10, max: 15 },
-  { label: '15–21 km', min: 15, max: 21 },
-  { label: '21–42 km', min: 21, max: 42 },
-  { label: '42+ km',   min: 42, max: Infinity },
+  // No unit in the label: "5–10 km" wraps to two lines under its bar.
+  { label: '< 5',   min: 0,  max: 5  },
+  { label: '5–10',  min: 5,  max: 10 },
+  { label: '10–15', min: 10, max: 15 },
+  { label: '15–21', min: 15, max: 21 },
+  { label: '21–42', min: 21, max: 42 },
+  { label: '42+',   min: 42, max: Infinity },
 ]
 
 export function distanceDistribution(activities: Activity[]): DistanceBracket[] {
@@ -218,47 +159,7 @@ export function distanceDistribution(activities: Activity[]): DistanceBracket[] 
     .filter((b) => b.count > 0)
 }
 
-interface Bucket {
-  id: string
-  label: string
-  acts: Activity[]
-}
-
-function buildSeries(buckets: Bucket[], scoped: Activity[]): AnalyticsSeries {
-  const typesPresent = new Set<ActivityType>()
-  const monthlyVolume: MonthlyVolume[] = []
-  const longRuns: MonthlyLongRuns[] = []
-  const easyHardSplit: MonthlyEasyHard[] = []
-
-  for (const { id, label, acts } of buckets) {
-    const base = { month: id, label }
-
-    const byType: Partial<Record<ActivityType, number>> = {}
-    for (const a of acts) {
-      byType[a.type] = round((byType[a.type] ?? 0) + a.distanceKm)
-      typesPresent.add(a.type)
-    }
-
-    const { easyPct, hardPct } = easyHardShare(acts)
-
-    monthlyVolume.push({ ...base, sessionCount: acts.length, totalKm: round(acts.reduce((s, a) => s + a.distanceKm, 0)), byType })
-    longRuns.push({
-      ...base,
-      longestKm: acts.length > 0 ? round(Math.max(...acts.map((a) => a.distanceKm))) : 0,
-    })
-    easyHardSplit.push({ ...base, easyPct, hardPct })
-  }
-
-  return {
-    monthlyVolume,
-    longRuns,
-    easyHardSplit,
-    distanceDistribution: distanceDistribution(scoped),
-    typesPresent: Array.from(typesPresent),
-  }
-}
-
-export function buildWeeklyTrends(all: Activity[]): WeeklyTrendPoint[] {
+export function buildWeeklyTrends(all: Activity[], z4FloorBpm = DEFAULT_Z4_FLOOR_BPM): WeeklyTrendPoint[] {
   const byWeek = new Map<string, Activity[]>()
   for (const a of all) {
     const monday = isoDate(startOfWeek(new Date(a.date + 'T12:00:00')))
@@ -279,13 +180,14 @@ export function buildWeeklyTrends(all: Activity[]): WeeklyTrendPoint[] {
         for (const z of a.hrZones) zoneSeconds[z.zone] = (zoneSeconds[z.zone] ?? 0) + z.seconds
       }
 
+      const longest = acts.reduce<Activity | null>((max, a) => (!max || a.distanceKm > max.distanceKm ? a : max), null)
+
       return {
         date: monday,
-        label: new Date(monday + 'T00:00:00').toLocaleDateString(t.locale, { day: 'numeric', month: 'short' }),
-        distanceKm: sumDistanceKm(acts),
-        sessionCount: acts.length,
+        // One decimal: the week under way reads "27.3 of 48", as Today's ring does.
+        distanceKm: round(acts.reduce((s, a) => s + a.distanceKm, 0)),
         easyPace: weightedPace(easy),
-        hardPace: weightedPace(hard),
+        hardPace: repPaceSecPerKm(hard, z4FloorBpm),
         ef: efficiencyFactor(easy),
         efAdjusted: adjustedEfficiencyFactor(easy),
         apparentTempC: avgField(easy, (a) => a.weather?.apparentTempC ?? null),
@@ -297,16 +199,16 @@ export function buildWeeklyTrends(all: Activity[]): WeeklyTrendPoint[] {
         verticalRatioPct: weightedVerticalRatio(acts),
         strideLengthM: weightedStrideLength(acts),
         avgRpe: avgField(acts, (a) => a.rpe),
-        aer: avgField(acts, (a) => a.aerTrainingEffect),
-        ana: avgField(acts, (a) => a.anaTrainingEffect),
         zoneSeconds,
+        longestKm: longest ? round(longest.distanceKm) : 0,
+        longestDate: longest?.date.slice(0, 10) ?? null,
+        thresholdSessions: acts.filter((a) => qualityKind(a.type) === 'threshold').length,
+        intervalSessions: acts.filter((a) => qualityKind(a.type) === 'intervals').length,
       }
     })
 }
 
 export function computeTotals(activities: Activity[], elapsedDays: number): YearTotals {
-  // Round once to a whole km (shared selector) - not round(…, 1) then round
-  // again at display, which pushed Analytics 1 km above Progress/Goals.
   const distanceKm = sumDistanceKm(activities)
   const calories = activities.reduce((s, a) => s + (a.calories ?? 0), 0)
   const days = Math.max(elapsedDays, 1)
@@ -321,137 +223,12 @@ export function computeTotals(activities: Activity[], elapsedDays: number): Year
   }
 }
 
-function buildYearAnalytics(year: number, activities: Activity[], now: Date): YearAnalytics {
-  const isCurrentYear = year === now.getFullYear()
-  const lastMonth = isCurrentYear ? now.getMonth() + 1 : 12
-
-  const byMonth = new Map<number, Activity[]>()
-  for (const a of activities) {
-    const m = Number(a.date.slice(5, 7))
-    const list = byMonth.get(m) ?? []
-    list.push(a)
-    byMonth.set(m, list)
-  }
-
-  const buckets: Bucket[] = Array.from({ length: lastMonth }, (_, i) => i + 1).map((m) => ({
-    id: `${year}-${String(m).padStart(2, '0')}`,
-    label: monthLabel(m),
-    acts: byMonth.get(m) ?? [],
-  }))
-
-  const elapsedDays = isCurrentYear
-    ? Math.floor((now.getTime() - new Date(year, 0, 1).getTime()) / 86400000) + 1
-    : Math.floor((new Date(year + 1, 0, 1).getTime() - new Date(year, 0, 1).getTime()) / 86400000)
-
-  return { year, totals: computeTotals(activities, elapsedDays), ...buildSeries(buckets, activities) }
-}
-
 function startOfWeek(d: Date): Date {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  x.setDate(x.getDate() - ((x.getDay() + 6) % 7)) // back to Monday
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7))
   return x
 }
 
-function isoDate(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-
-function buildAllTimeAnalytics(byYearMap: Map<number, Activity[]>, all: Activity[], now: Date): AllTimeAnalytics {
-  const buckets: Bucket[] = Array.from(byYearMap.keys())
-    .sort((a, b) => a - b)
-    .map((year) => ({ id: String(year), label: String(year), acts: byYearMap.get(year)! }))
-
-  const firstYear = buckets[0] ? Number(buckets[0].id) : now.getFullYear()
-  const elapsedDays = Math.floor((now.getTime() - new Date(firstYear, 0, 1).getTime()) / 86400000) + 1
-
-  return { totals: computeTotals(all, elapsedDays), ...buildSeries(buckets, all) }
-}
-
-const ROLLING_DAYS = 365
-
-function trimLeadingEmpty<T>(points: T[], hasValue: (p: T) => boolean): T[] {
-  const first = points.findIndex(hasValue)
-  return first === -1 ? [] : points.slice(first)
-}
-
-function buildEfficiencyDaily(activities: Activity[], now: Date): DailyEfficiency[] {
-  const EASY_TYPES_SET = new Set(EASY_TYPES)
-  const DAY_MS = 86_400_000
-  const easy = activities.filter((a) => EASY_TYPES_SET.has(a.type))
-  const nowMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-
-  const stamped = easy.map((a) => ({ a, ms: new Date(a.date + 'T00:00:00').getTime() }))
-
-  const points = Array.from({ length: ROLLING_DAYS }, (_, i) => {
-    const dayMs = nowMs - (ROLLING_DAYS - 1 - i) * DAY_MS
-    const day = new Date(dayMs)
-    const label = day.toLocaleDateString(t.locale, { day: 'numeric', month: 'short' })
-    const date = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
-
-    const in7  = stamped.filter((x) => x.ms >= dayMs - 6 * DAY_MS && x.ms <= dayMs).map((x) => x.a)
-    const in30 = stamped.filter((x) => x.ms >= dayMs - 29 * DAY_MS && x.ms <= dayMs).map((x) => x.a)
-
-    return {
-      date,
-      label,
-      ef7:  in7.length  >= 2 ? efficiencyFactor(in7)  : null,
-      ef30: in30.length >= 5 ? efficiencyFactor(in30) : null,
-    }
-  })
-
-  return trimLeadingEmpty(points, (p) => p.ef7 !== null || p.ef30 !== null)
-}
-
-function buildRunningDynamicsDaily(activities: Activity[], now: Date): DailyRunningDynamics[] {
-  const DAY_MS = 86_400_000
-  const nowMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const stamped = activities.map((a) => ({ a, ms: new Date(a.date + 'T00:00:00').getTime() }))
-
-  const points = Array.from({ length: ROLLING_DAYS }, (_, i) => {
-    const dayMs = nowMs - (ROLLING_DAYS - 1 - i) * DAY_MS
-    const day = new Date(dayMs)
-    const label = day.toLocaleDateString(t.locale, { day: 'numeric', month: 'short' })
-    const date = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
-
-    const in7  = stamped.filter((x) => x.ms >= dayMs - 6 * DAY_MS && x.ms <= dayMs).map((x) => x.a)
-    const in30 = stamped.filter((x) => x.ms >= dayMs - 29 * DAY_MS && x.ms <= dayMs).map((x) => x.a)
-
-    return {
-      date,
-      label,
-      cadence7:  in7.length  >= 2 ? weightedCadence(in7)  : null,
-      cadence30: in30.length >= 5 ? weightedCadence(in30) : null,
-      groundContact7:  in7.length  >= 2 ? weightedGroundContact(in7)  : null,
-      groundContact30: in30.length >= 5 ? weightedGroundContact(in30) : null,
-      verticalOscillation7:  in7.length  >= 2 ? weightedVerticalOscillation(in7)  : null,
-      verticalOscillation30: in30.length >= 5 ? weightedVerticalOscillation(in30) : null,
-    }
-  })
-
-  return trimLeadingEmpty(points, (p) => p.cadence7 !== null || p.cadence30 !== null)
-}
-
 export async function getAnalyticsData(): Promise<AnalyticsPageData> {
-  const all = getAllActivities()
-  const now = new Date()
-
-  const byYearMap = new Map<number, Activity[]>()
-  for (const a of all) {
-    const y = Number(a.date.slice(0, 4))
-    const list = byYearMap.get(y) ?? []
-    list.push(a)
-    byYearMap.set(y, list)
-  }
-
-  const years = Array.from(byYearMap.keys()).sort((a, b) => b - a)
-
-  return {
-    years,
-    byYear: Object.fromEntries(years.map((y) => [y, buildYearAnalytics(y, byYearMap.get(y)!, now)])),
-    weeklyTrends: buildWeeklyTrends(all),
-    efficiencyDaily: buildEfficiencyDaily(all, now),
-    runningDynamicsDaily: buildRunningDynamicsDaily(all, now),
-    allTime: buildAllTimeAnalytics(byYearMap, all, now),
-  }
+  return { weeklyTrends: buildWeeklyTrends(getAllActivities(), getAthleteProfile().hrZoneBoundsBpm?.[3] ?? DEFAULT_Z4_FLOOR_BPM) }
 }

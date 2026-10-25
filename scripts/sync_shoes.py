@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Sync shoe gear from Garmin Connect into public/data/shoes.json.
-
-Run this whenever a shoe is added or retired in Garmin Connect. Unlike
-sync.py it is not run on a schedule, since shoes only change a few times a
-year.
-"""
+"""Nightly in sync.yml; by hand to see a shoe added or retired in Garmin Connect before the next night."""
 
 from __future__ import annotations
 
@@ -16,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from data_directory import get_data_dir
 from garmin.client import GarminAuthError, GarminClient
 from garmin.gear import fetch_shoe_gear, write_shoes_json
 
@@ -43,17 +39,20 @@ def main() -> int:
     print(f"Found {len(shoes)} shoe(s):")
     for shoe in shoes:
         status = "retired" if shoe.retired else "active"
-        print(f"  {shoe.brand} {shoe.name}  ({status}, max {shoe.max_km} km)  {shoe.gear_id}")
+        print(f"  {shoe.brand} {shoe.model}  ({status}, max {shoe.max_km} km)  {shoe.gear_id}")
 
     if args.dry_run:
         print("\nDry run - preview of shoes.json:\n")
         print(json.dumps({"shoes": [shoe.to_dict() for shoe in shoes]}, indent=2))
         return 0
 
-    if write_shoes_json(shoes):
-        print("\npublic/data/shoes.json updated - review it, then push it with scripts/push_private_data.mjs.")
+    # Passed on rather than left to write_shoes_json's default, which is resolved at import and could name another
+    # workspace than the message.
+    output_path = get_data_dir() / "shoes.json"
+    if write_shoes_json(shoes, path=output_path):
+        print(f"\n{output_path} updated - review it before pushing private data.")
     else:
-        print("\npublic/data/shoes.json already up to date.")
+        print(f"\n{output_path} already up to date.")
 
     return 0
 

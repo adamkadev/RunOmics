@@ -5,8 +5,6 @@ import { usePathname } from 'next/navigation'
 
 const ACTIVITY_DETAIL_RE = /^\/activities\/[^/]+$/
 
-// Reuses the calendar's existing slide keyframes - a directional transition for the one
-// navigation pair worth the extra "soin" (list -> detail), a plain fade for everything else.
 function transitionClass(prevPath: string, path: string): string {
   if (prevPath === '/activities' && ACTIVITY_DETAIL_RE.test(path)) return 'animate-cal-forward'
   if (ACTIVITY_DETAIL_RE.test(prevPath) && path === '/activities') return 'animate-cal-backward'
@@ -23,8 +21,16 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
     setPrevPathname(pathname)
   }
 
+  // The class goes once the entry animation has run: nothing above a page's
+  // large title may stay animated.
   return (
-    <div key={pathname} className={className}>
+    <div
+      key={pathname}
+      className={className || undefined}
+      onAnimationEnd={(e) => {
+        if (e.target === e.currentTarget) setClassName('')
+      }}
+    >
       {children}
     </div>
   )

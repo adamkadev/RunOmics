@@ -9,11 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from data_directory import get_fit_cache_dir
 from processing.fit_parser import parse_fit
 from processing.weather import WeatherClient, weather_for_activity
 from repository.json_store import JsonActivityStore
 
-_FIT_DIR = Path(__file__).parent.parent / "public" / "fit"
+_FIT_DIR = get_fit_cache_dir()
 
 
 def main() -> int:
@@ -39,8 +40,7 @@ def main() -> int:
             outcomes["already had weather"] += 1
             continue
 
-        # Read off the JSON rather than the FIT: a run with no GPS trace has no
-        # start point to look conditions up at, and that costs no request to know.
+        # Read off the JSON rather than the FIT: knowing a run has no GPS trace costs no request.
         if not activity.get("route"):
             outcomes["no GPS trace"] += 1
             continue
@@ -85,8 +85,7 @@ def main() -> int:
                 store.touch(activity["id"])
         store.save()
 
-    # Union rather than a plain count so the tally reads the same on a dry run,
-    # where the filled activities are deliberately not on disk.
+    # A union so the tally reads the same on a dry run, where the filled activities are not on disk.
     covered = {a["id"] for a in store.all_activities() if a.get("weather")} | filled_ids
     print(f"\n{client.requests} API request(s), {client.failures} failed")
     for reason, count in outcomes.most_common():

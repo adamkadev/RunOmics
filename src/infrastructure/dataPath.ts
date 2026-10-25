@@ -1,10 +1,9 @@
 import 'server-only'
 import path from 'path'
 
-// Root-level, not public/: everything under public/ is served as a static
-// asset. scripts/prepare-data.mjs populates it, next.config.ts traces it.
-const DATA_DIR = path.join(process.cwd(), 'data')
-
+/** Read on every call, not at import: the CLIs choose their workspace at run time, possibly after a static import. */
 export function dataPath(...segments: string[]): string {
-  return path.join(DATA_DIR, ...segments)
+  const configured = process.env.RUNOMICS_DATA_DIR
+  const root = configured ? path.resolve(configured) : path.join(process.cwd(), 'data')
+  return path.join(root, ...segments)
 }

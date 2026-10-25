@@ -1,16 +1,22 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { handleInternalRoute } from '@/lib/internalRoute'
-import { sendPushToAllDevices } from '@/lib/sendPushNotification'
+import { sendPushes } from '@/lib/sendPushNotification'
 import { getNewPrs } from '@/application/usecases/GetNewPrs'
 import { formatDuration } from '@/lib/formatters'
+import { t } from '@/i18n'
+import { loadData } from '@/application/usecases/LoadData'
 
 export async function POST(req: NextRequest) {
   return handleInternalRoute('pr-check', req, async () => {
-    const newPrs = await getNewPrs()
+    await loadData()
+    const { newPrs, commit } = await getNewPrs()
 
-    for (const pr of newPrs) {
-      await sendPushToAllDevices(`New PR: ${pr.label}`, `${formatDuration(pr.seconds)} - new personal best!`)
-    }
+    // The marks are stored only once every push went out: a rare duplicate beats a PR that is never announced.
+    await sendPushes(
+      'records',
+      newPrs.map((pr) => ({ title: t.notifications.newPr.title(pr.label), body: t.notifications.newPr.body(formatDuration(pr.seconds)) }))
+    )
+    await commit()
 
     return NextResponse.json({ newPrs })
   })

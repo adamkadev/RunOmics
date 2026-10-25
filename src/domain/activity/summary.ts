@@ -1,10 +1,12 @@
-import type { Activity, ActivitySummary } from './types'
+import { activityRouteThumb } from './routeThumb'
+import type { Activity, ActivitySummary, HrZone } from './types'
 
-/**
- * Drops the per-sample arrays (route, pace/HR/cadence samples, splits) that make
- * up most of an activity's weight. Anything crossing the server/client boundary
- * for a list row or a card should go through this first.
- */
+export function zoneSeconds(hrZones: readonly Pick<HrZone, 'zone' | 'seconds'>[]): number[] {
+  const seconds: number[] = []
+  for (const { zone, seconds: s } of hrZones) seconds[zone - 1] = (seconds[zone - 1] ?? 0) + s
+  return Array.from(seconds, (s) => Math.round(s ?? 0))
+}
+
 export function toActivitySummary(a: Activity): ActivitySummary {
   return {
     id: a.id,
@@ -17,9 +19,8 @@ export function toActivitySummary(a: Activity): ActivitySummary {
     durationSeconds: a.durationSeconds,
     paceSecPerKm: a.paceSecPerKm,
     avgHeartRate: a.avgHeartRate,
-    rpe: a.rpe,
-    hrZones: a.hrZones,
-    week: a.week,
-    elevationGain: a.elevationGain,
+    zones: zoneSeconds(a.hrZones),
+    gearId: a.gearId,
+    routeThumb: activityRouteThumb(a),
   }
 }

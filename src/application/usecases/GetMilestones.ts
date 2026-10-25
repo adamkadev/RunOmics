@@ -3,17 +3,15 @@ import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepo
 import { getAllPlannedWorkouts } from '@/infrastructure/repositories/JsonPlannedWorkoutRepository'
 import { getRecords } from './GetRecords'
 import { computeWeekActivityDays } from './GetDashboardData'
-import { isoWeekNumber, startOfWeek, addDays, isoDate } from '@/lib/calendarDate'
-import { formatDuration } from '@/lib/formatters'
+import { DAY_MS, isoWeekNumber, startOfWeek, addDays, appTodayIso, isoDate } from '@/lib/calendarDate'
+import { formatDistance, formatDuration, formatKm } from '@/lib/formatters'
 import { t } from '@/i18n'
+import { WEEKLY_RUN_TARGET } from '@/domain/training/weeklyRunTarget'
 
 const DISTANCE_TIERS_KM = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000]
 const MIN_STREAK_WEEKS = 8
-const MAX_STREAK_WEEKS_TO_CHECK = 208 // 4 years
+const MAX_STREAK_WEEKS_TO_CHECK = 208
 
-// Never reset (unlike DISTANCE_TIERS_KM, which is per calendar year) - this
-// is the "since day 1" lifetime odometer. Tops out at Earth's equatorial
-// circumference, a fitting final tier for a distance that only ever grows.
 const LIFETIME_DISTANCE_TIERS_KM = [500, 1000, 1500, 2000, 3000, 4000, 5000, 7500, 10_000, 15_000, 20_000, 30_000, 40_075]
 const EARTH_CIRCUMFERENCE_KM = 40_075
 const MARATHON_KM = 42.195
@@ -26,7 +24,7 @@ export interface Milestone {
   type: MilestoneType
   date: string
   label: string
-  detail: string
+  detail?: string
 }
 
 export interface DistanceTierCrossing {
@@ -35,7 +33,6 @@ export interface DistanceTierCrossing {
   date: string
 }
 
-/** Annual cumulative distance tier crossings, in the order they happened. Resets each calendar year. */
 export function findDistanceTierMilestones(
   activitiesAscByDate: { date: string; distanceKm: number }[],
   tiers: number[] = DISTANCE_TIERS_KM,
@@ -68,7 +65,6 @@ export interface LifetimeDistanceCrossing {
   cumulativeKm: number
 }
 
-/** All-time cumulative distance tier crossings, in the order they happened. Unlike findDistanceTierMilestones, never resets. */
 export function findLifetimeDistanceMilestones(
   activitiesAscByDate: { date: string; distanceKm: number }[],
   tiers: number[] = LIFETIME_DISTANCE_TIERS_KM,
@@ -94,7 +90,6 @@ export interface ActivityCountCrossing {
   cumulativeKm: number
 }
 
-/** Every-Nth-session milestones ("100th run"), in the order they happened. */
 export function findActivityCountMilestones(
   activitiesAscByDate: { date: string; distanceKm: number }[],
   tiers: number[] = ACTIVITY_COUNT_TIERS,
@@ -120,8 +115,15 @@ export interface WeekStreak {
   startDate: string
 }
 
-export function currentWeekStreak(activities: Activity[], now: Date): WeekStreak | null {
-  const activeWeeks = new Set(activities.map((a) => a.week))
+function weeksWith<T>(activities: Activity[], key: (a: Activity) => T, minRuns: number): Set<T> {
+  const counts = new Map<T, number>()
+  for (const a of activities) counts.set(key(a), (counts.get(key(a)) ?? 0) + 1)
+  return new Set([...counts].filter(([, runs]) => runs >= minRuns).map(([week]) => week))
+}
+
+/** A week under way that has not reached `minRuns` yet carries the streak from the week before. */
+export function currentWeekStreak(activities: Activity[], now: Date, minRuns = 1): WeekStreak | null {
+  const activeWeeks = weeksWith(activities, (a) => a.week, minRuns)
   let cursor = activeWeeks.has(isoWeekNumber(now)) ? now : addDays(now, -7)
 
   let weeks = 0
@@ -135,15 +137,15 @@ export function currentWeekStreak(activities: Activity[], now: Date): WeekStreak
   return { weeks, startDate: isoDate(startOfWeek(streakStartWeek)) }
 }
 
-export function longestWeekStreak(activities: Activity[]): number {
-  const weekStarts = new Set(activities.map((a) => isoDate(startOfWeek(new Date(a.date + 'T00:00:00')))))
+export function longestWeekStreak(activities: Activity[], minRuns = 1): number {
+  const weekStarts = weeksWith(activities, (a) => isoDate(startOfWeek(new Date(a.date + 'T00:00:00'))), minRuns)
   const sorted = Array.from(weekStarts).sort()
 
   let longest = 0
   let run = 0
   let prev: string | null = null
   for (const day of sorted) {
-    const diffDays = prev ? Math.round((new Date(day + 'T00:00:00').getTime() - new Date(prev + 'T00:00:00').getTime()) / 86_400_000) : null
+    const diffDays = prev ? Math.round((new Date(day + 'T00:00:00').getTime() - new Date(prev + 'T00:00:00').getTime()) / DAY_MS) : null
     run = diffDays === 7 ? run + 1 : 1
     if (run > longest) longest = run
     prev = day
@@ -154,31 +156,84 @@ export function longestWeekStreak(activities: Activity[]): number {
 export interface WeeklyStreakData {
   currentWeeks: number
   longestWeeks: number
-  weekDays: boolean[] // Mon..Sun
-  plannedDays: boolean[] // Mon..Sun - a past day with no plan is rest, not missed
+  weekDays: boolean[]
+  plannedDays: boolean[]
 }
 
-/** Days of the current week that carry a scheduled session (Mon..Sun). */
 export function computeWeekPlannedDays(planned: { date: string }[], now: Date): boolean[] {
   const dateSet = new Set(planned.map((w) => w.date.slice(0, 10)))
   const monday = startOfWeek(now)
   return Array.from({ length: 7 }, (_, i) => dateSet.has(isoDate(addDays(monday, i))))
 }
 
-export function getWeeklyStreakData(now = new Date()): WeeklyStreakData | null {
+/**
+ * The streak Today, the Progress hub and Consistency count. The milestone's
+ * own streak stays a run every week, as its copy says.
+ */
+export function getWeeklyStreakData(now = new Date(`${appTodayIso()}T12:00:00`)): WeeklyStreakData | null {
   const activities = getAllActivities()
   if (!activities.length) return null
-  const streak = currentWeekStreak(activities, now)
+  const streak = currentWeekStreak(activities, now, WEEKLY_RUN_TARGET)
   return {
     currentWeeks: streak?.weeks ?? 0,
-    longestWeeks: longestWeekStreak(activities),
+    longestWeeks: longestWeekStreak(activities, WEEKLY_RUN_TARGET),
     weekDays: computeWeekActivityDays(activities, now),
     plannedDays: computeWeekPlannedDays(getAllPlannedWorkouts(), now),
   }
 }
 
-export async function getMilestones(): Promise<Milestone[]> {
-  const activities = getAllActivities() // newest first
+export interface NextMilestone {
+  kind: 'activity-count' | 'distance-tier'
+  label: string
+  /** What is left, in the milestone's own unit: runs or km. */
+  remaining: number
+  /** 0-1, measured from zero rather than from the last tier. */
+  progress: number
+}
+
+export function findNextMilestones(
+  activitiesAscByDate: { date: string; distanceKm: number }[],
+  year: number,
+  countTiers: number[] = ACTIVITY_COUNT_TIERS,
+  distanceTiers: number[] = DISTANCE_TIERS_KM,
+): NextMilestone[] {
+  const next: NextMilestone[] = []
+
+  const count = activitiesAscByDate.length
+  const countTier = countTiers.find((tier) => tier > count)
+  if (countTier !== undefined) {
+    next.push({
+      kind: 'activity-count',
+      label: t.profile.milestones.activityCount(countTier),
+      remaining: countTier - count,
+      progress: count / countTier,
+    })
+  }
+
+  const yearKm = activitiesAscByDate
+    .filter((a) => Number(a.date.slice(0, 4)) === year)
+    .reduce((sum, a) => sum + a.distanceKm, 0)
+  const distanceTier = distanceTiers.find((tier) => tier > yearKm)
+  if (distanceTier !== undefined) {
+    next.push({
+      kind: 'distance-tier',
+      label: t.profile.milestones.distanceTier(formatKm(distanceTier)),
+      // Rounded up: "0 to go" would be a milestone already passed.
+      remaining: Math.ceil(distanceTier - yearKm),
+      progress: yearKm / distanceTier,
+    })
+  }
+
+  return next
+}
+
+export function getNextMilestones(today: string = appTodayIso()): NextMilestone[] {
+  const ascending = [...getAllActivities()].sort((a, b) => a.date.localeCompare(b.date))
+  return findNextMilestones(ascending, Number(today.slice(0, 4)))
+}
+
+export async function getMilestones(today: string = appTodayIso()): Promise<Milestone[]> {
+  const activities = getAllActivities()
   const ascending = [...activities].sort((a, b) => a.date.localeCompare(b.date))
 
   const milestones: Milestone[] = []
@@ -187,8 +242,9 @@ export async function getMilestones(): Promise<Milestone[]> {
     milestones.push({
       type: 'distance-tier',
       date: crossing.date,
-      label: t.profile.milestones.distanceTier(crossing.tierKm),
-      detail: t.profile.milestones.distanceTierDetail(crossing.year),
+      label: t.profile.milestones.distanceTier(formatKm(crossing.tierKm)),
+      // The month heading above says the year only when it is not this one.
+      detail: String(crossing.year),
     })
   }
 
@@ -198,7 +254,7 @@ export async function getMilestones(): Promise<Milestone[]> {
       type: 'first-activity',
       date: first.date,
       label: t.profile.milestones.firstActivity,
-      detail: t.profile.milestones.firstActivityDetail(first.distanceKm),
+      detail: t.profile.milestones.firstActivityDetail(formatKm(first.distanceKm, 1)),
     })
   }
 
@@ -206,7 +262,7 @@ export async function getMilestones(): Promise<Milestone[]> {
     milestones.push({
       type: 'lifetime-distance',
       date: crossing.date,
-      label: t.profile.milestones.lifetimeDistance(crossing.tierKm),
+      label: t.profile.milestones.lifetimeDistance(formatKm(crossing.tierKm)),
       detail:
         crossing.tierKm >= EARTH_CIRCUMFERENCE_KM
           ? t.profile.milestones.lifetimeDistanceWorldTour
@@ -219,11 +275,11 @@ export async function getMilestones(): Promise<Milestone[]> {
       type: 'activity-count',
       date: crossing.date,
       label: t.profile.milestones.activityCount(crossing.count),
-      detail: t.profile.milestones.activityCountDetail(Math.round(crossing.cumulativeKm)),
+      detail: t.profile.milestones.activityCountDetail(formatKm(crossing.cumulativeKm)),
     })
   }
 
-  const streak = currentWeekStreak(activities, new Date())
+  const streak = currentWeekStreak(activities, new Date(`${today}T12:00:00`))
   if (streak && streak.weeks >= MIN_STREAK_WEEKS) {
     milestones.push({
       type: 'streak',
@@ -240,7 +296,11 @@ export async function getMilestones(): Promise<Milestone[]> {
         type: 'record',
         date: r.date,
         label: t.profile.milestones.record(r.label),
-        detail: formatDuration(r.seconds),
+        // Longest Run is a distance record: its headline is how far, not how long.
+        detail:
+          r.distanceKm != null
+            ? `${formatDistance(r.distanceKm)} ${t.units.km}`
+            : formatDuration(r.seconds),
       })
     }
   }

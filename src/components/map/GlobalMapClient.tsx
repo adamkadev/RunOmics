@@ -1,130 +1,455 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Globe, Maximize, Minimize } from "lucide-react";
+import { Maximize, Minimize, SlidersHorizontal } from "lucide-react";
 import type { MapShellData } from "@/application/usecases/GetAllRoutes";
-import type { ActivityType } from "@/domain/activity/types";
+import { ACTIVITY_TYPES } from "@/domain/activity/types";
+import { areaForCluster } from "@/domain/explore/areaForCluster";
+import { medianStart } from "@/domain/explore/home";
+import type { ExploreAreaRef, ScoredRoute } from "@/domain/explore/types";
 import { reverseGeocode } from "@/lib/reverseGeocode";
 import { t } from "@/i18n";
+import { cn } from "@/lib/utils";
+import { formatKm, formatNumber } from "@/lib/formatters";
+import { removeUrlParams, useUrlParam } from "@/lib/useUrlParam";
+import { MAP_PADDING, type CameraPadding, type LngLatBounds } from "@/lib/routeFrame";
 import { useSetFullscreenChromeHidden } from "@/components/layout/FullscreenChromeContext";
+import type { TerritoryCardContent } from "./TerritoryBand";
 import { ClusterPanel } from "./ClusterPanel";
-import { YearPicker } from "./YearPicker";
-import { TypePicker } from "./TypePicker";
+import { HeatFilterSheet } from "./HeatFilterSheet";
 import { HeatLegend } from "./HeatLegend";
-import { useMapRoutes } from "./useMapRoutes";
-import { RoutePreview } from "./RoutePreview";
-import { coordLabel, matchesFilters, type HeatFilters } from "./mapUtils";
-
-// Canonical order for the type filter (fastest -> easiest), matching the rest of the app.
-const TYPE_ORDER: ActivityType[] = [
-  "Sprint",
-  "Anaerobic",
-  "VO2Max",
-  "Threshold",
-  "Tempo",
-  "Base",
-  "Race",
-];
+import { MapAttribution, type MapCredit } from "@/components/ui/MapAttribution";
+import { GlassLayers, GLASS_CIRCLE, glassClass } from "@/components/ui/GlassSurface";
+import { useMapRoutes, type HomeRing } from "./useMapRoutes";
+import { clusterTracks, type ClusterTracks, type TrackDetail } from "./mapData";
+import { LayersButton } from "@/components/explore/LayersButton";
+import { DistrictsLegend } from "@/components/explore/DistrictsLegend";
+import { useDistrictsCoverage } from "@/components/explore/useDistrictsCoverage";
+import { districtsCardContent } from "@/components/explore/districtsCard";
+import { useDistrictsOverlay, useDistrictsSync } from "@/components/explore/useDistrictsOverlay";
+import { initialMapLayer, parseMapLayer, readStoredMapLayer, storeMapLayer, type MapLayer } from "@/components/explore/mapLayer";
+import { NextQuartierCard } from "@/components/explore/NextQuartierCard";
+import { QuartierSheet } from "@/components/explore/QuartierSheet";
+import { useDistrictsTap, useQuartierCamera } from "@/components/explore/useQuartierMap";
+import { parseExploreRoute } from "@/components/explore/exploreHref";
+import { RouteGeneratorMode } from "@/components/explore/RouteGeneratorMode";
+import {
+  easyPaceOf,
+  generatorPlan,
+  generatorTarget,
+  lineBounds,
+  medianOf,
+  unionBounds,
+  type ExplorePlan,
+  type GeneratorTarget,
+} from "@/components/explore/routeGenerator";
+import type { RouteDrawing } from "@/components/explore/routeLayer";
+import { routeStartState, type RouteStartMode } from "@/components/explore/routeStart";
+import { combineOverlays, useRouteOverlay, useRouteSync } from "@/components/explore/useRouteOverlay";
+import { quartierPadding, sheetBoxOf, unitBounds } from "@/components/explore/quartierCamera";
+import {
+  activeFilterCount,
+  areaRows,
+  coordLabel,
+  computeAreaTerritory,
+  matchesFilters,
+  NO_HEAT_FILTERS,
+  reachKm,
+  reachLabel,
+  type HeatFilters,
+} from "./mapUtils";
 
 interface Props {
   data: MapShellData;
+  /** What `data` and the tracks are fetched under. */
+  version: string;
+  onContentChange?: (content: TerritoryCardContent | null) => void;
+  /** Areas with Districts; none hides the layers button. */
+  exploreAreas?: readonly ExploreAreaRef[];
+  explorePlans?: readonly ExplorePlan[];
+  /** Unit id → the day it passed 90 %, worked out on the server. */
+  completedSince?: Readonly<Record<string, string>>;
+  /** 'YYYY-MM-DD', on this device's clock. */
+  today?: string | null;
 }
 
-export function GlobalMapClient({ data }: Props) {
-  const { clusters, routeMeta } = data;
-  const hasMapToken = Boolean(process.env.NEXT_PUBLIC_MAPTILER_TOKEN);
-  const [selectedIdx, setSelectedIdx] = useState(data.defaultClusterIdx);
-  const [selectedYear, setSelectedYear] = useState<string | null>(null);
-  const [selectedType, setSelectedType] = useState<ActivityType | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [worldView, setWorldView] = useState(false);
-  const [names, setNames] = useState<string[]>(() => clusters.map(coordLabel));
+const NO_AREAS: readonly ExploreAreaRef[] = [];
+const NO_RUNS: readonly number[] = [];
+const NO_CREDITS: readonly MapCredit[] = [];
+const NO_PLANS: readonly ExplorePlan[] = [];
+const NO_TRACKS: [number, number][][] = [];
 
-  // GPS coordinates, sparse and keyed by absolute activity index - populated lazily
-  // per zone (see effect below) so the world view and an unvisited zone never pay
-  // for coordinate data they don't render. Undefined entries are already handled
-  // throughout mapUtils.ts (buildGeoJSON/buildHeatGeoJSON skip missing routes).
-  const [routes, setRoutes] = useState<[number, number][][]>([]);
-  const loadedClusterIds = useRef<Set<string>>(new Set());
+const EXPLORE_PARAMS = ["explore", "quartier", "km", "pace", "date", "from"] as const;
+
+interface GeneratorState extends GeneratorTarget {
+  plan: ExplorePlan | null;
+  /** null when a link opened it. */
+  returnTo: { expanded: boolean; unitId: string | null } | null;
+  /** Where focus goes back to on close; null when a link opened it. */
+  opener: GeneratorOpener | null;
+}
+
+interface GeneratorOpener {
+  element: HTMLElement | null;
+  /** Its card unmounts with the generator open: focus goes to the new card's button instead. */
+  fromNextCard: boolean;
+}
+
+/** Until the panel is measured: it stands about 430 pt tall on a phone. */
+const GENERATOR_PADDING: CameraPadding = { top: 72, right: 24, bottom: 460, left: 24 };
+
+const samePadding = (a: CameraPadding | null, b: CameraPadding | null) =>
+  a === b || (!!a && !!b && a.top === b.top && a.right === b.right && a.bottom === b.bottom && a.left === b.left);
+
+const bboxBounds = ([minLon, minLat, maxLon, maxLat]: readonly [number, number, number, number]): LngLatBounds => ({ minLon, minLat, maxLon, maxLat });
+
+/** A cluster's tracks at one level of detail, gathered by global route index as each cluster arrives. */
+function useClusterTracks(version: string, clusterId: string | null, detail: TrackDetail): [number, number][][] {
+  const [tracks, setTracks] = useState<{ version: string; detail: TrackDetail; routes: [number, number][][]; loaded: Set<string> }>(
+    () => ({ version, detail, routes: [], loaded: new Set() }),
+  );
 
   useEffect(() => {
-    const cluster = clusters[selectedIdx];
-    if (!cluster || loadedClusterIds.current.has(cluster.id)) return;
+    if (clusterId === null) return;
     let cancelled = false;
-
-    fetch(`/api/map/routes?cluster=${encodeURIComponent(cluster.id)}`)
-      .then((res) => (res.ok ? (res.json() as Promise<{ routes: Record<string, [number, number][]> }>) : null))
-      .then((json) => {
-        if (cancelled || !json) return;
-        loadedClusterIds.current.add(cluster.id);
-        setRoutes((prev) => {
-          const next = [...prev];
-          for (const [idxStr, coords] of Object.entries(json.routes)) {
-            next[Number(idxStr)] = coords;
-          }
-          return next;
-        });
-      })
-      .catch(() => {
-        // Best-effort: the zone just renders with no heat trace until a retry
-        // (e.g. a re-select) succeeds.
+    void clusterTracks(version, clusterId, detail).then((answer: ClusterTracks | null) => {
+      if (cancelled || !answer) return;
+      setTracks((prev) => {
+        const same = prev.version === version && prev.detail === detail;
+        if (same && prev.loaded.has(clusterId)) return prev;
+        const routes = same ? [...prev.routes] : [];
+        for (const [idxStr, coords] of Object.entries(answer)) routes[Number(idxStr)] = coords;
+        return { version, detail, routes, loaded: new Set(same ? [...prev.loaded, clusterId] : [clusterId]) };
       });
-
+    });
     return () => {
       cancelled = true;
     };
-  }, [selectedIdx, clusters]);
+  }, [version, clusterId, detail]);
 
-  const filters: HeatFilters = useMemo(
-    () => ({ year: selectedYear, type: selectedType }),
-    [selectedYear, selectedType],
-  );
+  return tracks.version === version && tracks.detail === detail ? tracks.routes : NO_TRACKS;
+}
+
+export function GlobalMapClient({ data, version, onContentChange, exploreAreas = NO_AREAS, explorePlans = NO_PLANS, completedSince, today = null }: Props) {
+  const { clusters, routeMeta } = data;
+  // A link's area (the Explored card's other areas) opens its busiest cluster; the hand's choice drops it.
+  const [areaParam, setAreaParam] = useUrlParam("area");
+  const [selectedIdx, setSelectedIdx] = useState(() => {
+    const linked = areaParam ? clusters.findIndex((cluster) => areaForCluster(exploreAreas, cluster)?.id === areaParam) : -1;
+    return linked >= 0 ? linked : data.defaultClusterIdx;
+  });
+  const [filters, setFilters] = useState<HeatFilters>(NO_HEAT_FILTERS);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  // By hand only; the generator expands the map too (isFullscreen).
+  const [expanded, setExpanded] = useState(false);
+  const [names, setNames] = useState<string[]>(() => clusters.map(coordLabel));
+
+  // The generator's distance when no plan gives one.
+  const medianKm = useMemo(() => medianOf(routeMeta, clusters[selectedIdx]?.routeIndices ?? NO_RUNS, (m) => m.distanceKm), [routeMeta, clusters, selectedIdx]);
+  const easyPace = useMemo(() => easyPaceOf(routeMeta, clusters[selectedIdx]?.routeIndices ?? NO_RUNS, today), [routeMeta, clusters, selectedIdx, today]);
+
+  const [exploreParam] = useUrlParam("explore");
+  const [kmParam] = useUrlParam("km");
+  const [paceParam] = useUrlParam("pace");
+  const [fromParam] = useUrlParam("from");
+  const [dateParam] = useUrlParam("date");
+  const [quartierParam, setQuartierParam] = useUrlParam("quartier");
+  const [generator, setGenerator] = useState<GeneratorState | null>(() => {
+    const link = parseExploreRoute({ explore: exploreParam, quartier: quartierParam, km: kmParam, pace: paceParam, date: dateParam, from: fromParam });
+    const home = clusters[data.defaultClusterIdx];
+    if (!link || !home || exploreAreas.length === 0 || !areaForCluster(exploreAreas, home)) return null;
+    const plan = generatorPlan(explorePlans, link, today);
+    return { ...generatorTarget(link, { plan, medianKm, easyPace }), plan, returnTo: null, opener: null };
+  });
+  const linkedGenerator = generator !== null;
+
+  // Read once, on mount. A change by hand takes the link's layer out of the
+  // address, so a remount (List and back) keeps the hand's choice instead of
+  // applying the link again.
+  const [layerParam, setLayerParam] = useUrlParam("layer");
+  const [linkedLayer] = useState<MapLayer | null>(() => parseMapLayer(layerParam));
+  const [layer, setLayer] = useState<MapLayer>(() => (linkedGenerator ? "districts" : initialMapLayer(layerParam, readStoredMapLayer())));
+  useEffect(() => {
+    if (linkedLayer) storeMapLayer(linkedLayer);
+  }, [linkedLayer]);
+
+  const [linkedQuartier, setLinkedQuartier] = useState<string | null>(() => (linkedGenerator ? null : quartierParam));
+  const [openUnitId, setOpenUnitId] = useState<string | null>(null);
+
+  const routes = useClusterTracks(version, clusters[selectedIdx]?.id ?? null, "drawn");
 
   const availableTypes = useMemo(() => {
     const present = new Set(routeMeta.map((m) => m.type));
-    return TYPE_ORDER.filter((ty) => present.has(ty));
+    return ACTIVITY_TYPES.filter((ty) => present.has(ty));
   }, [routeMeta]);
 
-  const clusterStats = useMemo(
-    () =>
-      clusters.map((c) => {
-        const indices = c.routeIndices.filter((i) => matchesFilters(routeMeta[i], filters));
-        return {
-          routeCount: indices.length,
-          totalKm: Math.round(indices.reduce((s, i) => s + (routeMeta[i]?.distanceKm ?? 0), 0)),
-        };
-      }),
-    [clusters, routeMeta, filters],
+  const rows = useMemo(() => areaRows(clusters, routeMeta, filters), [clusters, routeMeta, filters]);
+
+  // Also what the sheet's button counts, under the sheet's own filters.
+  const areaRuns = useCallback(
+    (f: HeatFilters) => clusters[selectedIdx]?.routeIndices.filter((i) => matchesFilters(routeMeta[i], f)) ?? [],
+    [clusters, selectedIdx, routeMeta],
+  );
+  const visibleIndices = useMemo(() => areaRuns(filters), [areaRuns, filters]);
+
+  const handleSelectCluster = useCallback(
+    (idx: number) => {
+      setSelectedIdx(idx);
+      if (areaParam !== null) setAreaParam(null);
+    },
+    [areaParam, setAreaParam],
   );
 
-  const visibleIndices = useMemo(
-    () =>
-      clusters[selectedIdx]?.routeIndices.filter((i) => matchesFilters(routeMeta[i], filters)) ?? [],
-    [clusters, selectedIdx, routeMeta, filters],
-  );
-  const visibleRoutes = visibleIndices
-    .map((index) => routes[index])
-    .filter((route): route is [number, number][] => Boolean(route));
+  const districtsArea = useMemo(() => {
+    const cluster = clusters[selectedIdx];
+    return cluster && exploreAreas.length > 0 ? areaForCluster(exploreAreas, cluster) : null;
+  }, [clusters, selectedIdx, exploreAreas]);
+  const generatorOpen = generator !== null && !!districtsArea;
+  const isFullscreen = expanded || generatorOpen;
+  const districtsOn = (layer === "districts" || generatorOpen) && !!districtsArea;
+  // Coverage counts cells along the tracks as recorded: simplified ones would move quartiers' percentages.
+  const coverageRoutes = useClusterTracks(version, districtsOn ? (clusters[selectedIdx]?.id ?? null) : null, "full");
+  const toggleLayer = useCallback(() => {
+    const next: MapLayer = layer === "districts" ? "heat" : "districts";
+    setLayer(next);
+    storeMapLayer(next);
+    if (layerParam !== null) setLayerParam(null);
+    setLinkedQuartier(null);
+    setOpenUnitId(null);
+    if (quartierParam !== null) setQuartierParam(null);
+  }, [layer, layerParam, setLayerParam, quartierParam, setQuartierParam]);
 
-  // Shared by the zone dropdown and the world-view bubbles, so either path exits
-  // world view the same way and hands the camera back to the per-zone effect.
-  const handleSelectCluster = useCallback((idx: number) => {
-    setSelectedIdx(idx);
-    setWorldView(false);
-  }, []);
+  // Every run's start, whatever the filters: a quartier's distance from home
+  // doesn't follow them.
+  const districtsHome = useMemo(() => {
+    const cluster = clusters[selectedIdx];
+    if (!districtsOn || !cluster) return null;
+    return medianStart(cluster.routeIndices.flatMap((i) => (coverageRoutes[i]?.[0] ? [coverageRoutes[i]![0]!] : [])));
+  }, [districtsOn, clusters, selectedIdx, coverageRoutes]);
 
-  const clusterCounts = useMemo(() => clusterStats.map((s) => s.routeCount), [clusterStats]);
-
-  const { containerRef, resize } = useMapRoutes(
-    data,
-    routes,
-    selectedIdx,
+  const districts = useDistrictsCoverage({
+    enabled: districtsOn,
+    area: districtsArea,
+    routes: coverageRoutes,
+    clusterIndices: clusters[selectedIdx]?.routeIndices ?? NO_RUNS,
     visibleIndices,
-    worldView,
-    clusterCounts,
-    names,
-    handleSelectCluster,
+    routeMeta,
+    home: districtsHome,
+  });
+  const { area: districtsFile, coverage: districtsCoverage, status: districtsStatus } = districts;
+
+  // Adjusted while rendering, as React has state follow state.
+  if (linkedQuartier !== null && districtsOn && districtsStatus === "ready" && districtsCoverage) {
+    setLinkedQuartier(null);
+    if (districtsCoverage.units.some((u) => u.id === linkedQuartier)) setOpenUnitId(linkedQuartier);
+  }
+  const openUnit = (districtsOn && !generatorOpen && openUnitId && districtsCoverage?.units.find((u) => u.id === openUnitId)) || null;
+  const sheetOpen = openUnit !== null;
+  const nextUnit = (districtsOn && districtsCoverage?.nextId && districtsCoverage.units.find((u) => u.id === districtsCoverage.nextId)) || null;
+  const closeQuartier = useCallback(() => {
+    setOpenUnitId(null);
+    if (quartierParam !== null) setQuartierParam(null);
+  }, [quartierParam, setQuartierParam]);
+
+  const nextCardRef = useRef<HTMLButtonElement>(null);
+  const expandRef = useRef<HTMLButtonElement>(null);
+  const [routePrefs, setRoutePrefs] = useState(() => ({ avoidBusyRoads: true, newStreetsFirst: true, flatForReps: !!generator?.plan?.quality }));
+  const planRun = useCallback(
+    (unitId: string) => {
+      const active = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+      const opener = { element: active, fromNextCard: !!active?.closest("[data-testid='next-quartier-card']") };
+      const plan = generatorPlan(explorePlans, null, today);
+      setGenerator({ ...generatorTarget(null, { unitId, plan, medianKm, easyPace }), plan, returnTo: { expanded, unitId: openUnitId }, opener });
+      setRoutePrefs((prefs) => ({ ...prefs, flatForReps: !!plan?.quality }));
+      setOpenUnitId(null);
+    },
+    [explorePlans, today, medianKm, easyPace, expanded, openUnitId],
   );
+  const onPlanRun = districtsArea ? planRun : undefined;
+  const [drawnRoute, setDrawnRoute] = useState<ScoredRoute | null>(null);
+  const [startMode, setStartMode] = useState<RouteStartMode>("pick");
+  const [pickedStart, setPickedStart] = useState<[number, number] | null>(null);
+  const routeStart = useMemo(() => routeStartState(startMode, pickedStart), [startMode, pickedStart]);
+  // The closed generator's opener, until the map it gives back has rendered.
+  const closedOpener = useRef<GeneratorOpener | null>(null);
+  const closeGenerator = useCallback(() => {
+    const back = generator?.returnTo ?? null;
+    closedOpener.current = generator?.opener ?? null;
+    setGenerator(null);
+    setDrawnRoute(null);
+    setStartMode("pick");
+    setPickedStart(null);
+    if (back) {
+      setExpanded(back.expanded);
+      setOpenUnitId(back.unitId);
+    }
+    if (exploreParam !== null) removeUrlParams(EXPLORE_PARAMS);
+  }, [generator, exploreParam]);
+  const setRouteKm = useCallback((km: number) => setGenerator((g) => (g ? { ...g, km } : g)), []);
+
+  const generatorUnitId = generator?.unitId ?? null;
+  const target = useMemo(() => {
+    if (!generatorOpen || !districtsFile) return null;
+    const asked = generatorUnitId ? districtsFile.features.find((f) => f.properties.id === generatorUnitId) : undefined;
+    if (asked) return { id: asked.properties.id, name: asked.properties.name };
+    if (!districtsCoverage) return null;
+    const units = districtsCoverage.units;
+    const next = units.find((u) => u.id === districtsCoverage.nextId) ?? [...units].sort((a, b) => a.pct - b.pct)[0];
+    return next ? { id: next.id, name: next.name } : null;
+  }, [generatorOpen, districtsFile, districtsCoverage, generatorUnitId]);
+
+  const districtsState = useMemo(
+    () => ({
+      area: districtsFile,
+      coverage: districtsCoverage,
+      visible: true,
+      selectedId: openUnit?.id ?? null,
+      // The generator names its quartier alone; none until it is known.
+      labelOnly: generatorOpen ? (target?.id ?? "") : null,
+    }),
+    [districtsFile, districtsCoverage, openUnit?.id, generatorOpen, target?.id],
+  );
+  const districtsOverlay = useDistrictsOverlay(districtsState, districtsOn);
+
+  // Home is drawn here only, never sent anywhere.
+  const startPoint = routeStart.origin;
+  const routeDrawing = useMemo<RouteDrawing | null>(() => {
+    if (!generatorOpen) return null;
+    if (drawnRoute) return { coordinates: drawnRoute.candidate.coordinates, newSteps: drawnRoute.newSteps, from: startPoint ?? districtsHome };
+    return startPoint ? { coordinates: [], newSteps: [], from: startPoint } : null;
+  }, [generatorOpen, drawnRoute, districtsHome, startPoint]);
+  const routeOverlay = useRouteOverlay(routeDrawing, generatorOpen);
+  const overlay = useMemo(() => combineOverlays(districtsOverlay, routeOverlay), [districtsOverlay, routeOverlay]);
+
+  const territory = useMemo(() => {
+    const cluster = clusters[selectedIdx];
+    return cluster ? computeAreaTerritory(cluster, routeMeta, routes, filters) : null;
+  }, [clusters, selectedIdx, routeMeta, routes, filters]);
+
+  // At the distance the card's sentence states.
+  const ring = useMemo<HomeRing | null>(
+    () => (territory ? { center: territory.home, radiusKm: reachKm(territory.medianReachKm) } : null),
+    [territory],
+  );
+
+  const cardContent = useMemo<TerritoryCardContent | null>(() => {
+    const s = t.pages.map.territory;
+    const cluster = clusters[selectedIdx];
+    if (!cluster || !territory) return null;
+    // Not the coordinate label: the sentence would read "all your 0.0°N
+    // 150.0°W running".
+    const areaName = names[selectedIdx];
+    const place = areaName && areaName !== coordLabel(cluster) ? areaName : null;
+    const reach = reachLabel(territory.medianReachKm);
+    const { types, years } = filters;
+    const typeLabel = types.length === 1 ? t.activityTypes[types[0]!] : types.length > 1 ? t.pages.map.filters.types(types.length) : null;
+    const eyebrow = [
+      place ?? s.homeArea,
+      ...(typeLabel ? [typeLabel] : []),
+      years.length > 0 ? [...years].sort().reverse().join(", ") : t.pages.map.allYears,
+    ].join(" · ");
+    return {
+      eyebrow,
+      headline: s.headline(territory.percentVolume, reach, selectedIdx === data.defaultClusterIdx),
+      stats: [
+        { label: s.runsStat, value: String(territory.routeCount) },
+        { label: s.kmStat, value: formatKm(territory.km), unit: t.units.km },
+        { label: s.reachStat, value: formatNumber(reachKm(territory.medianReachKm)), unit: t.units.km },
+      ],
+    };
+  }, [clusters, selectedIdx, territory, names, filters, data.defaultClusterIdx]);
+
+  const districtsCard = useMemo(
+    () =>
+      districtsOn && cardContent
+        ? districtsCardContent(cardContent.eyebrow, { coverage: districtsCoverage, status: districtsStatus }, onPlanRun)
+        : null,
+    [districtsOn, cardContent, districtsCoverage, districtsStatus, onPlanRun],
+  );
+  const shownCard = districtsCard ?? cardContent;
+
+  useEffect(() => {
+    onContentChange?.(shownCard);
+  }, [onContentChange, shownCard]);
+
+  const districtsBbox = districtsOn && isFullscreen && !generatorOpen ? districtsArea?.bbox : undefined;
+  const targetId = target?.id ?? null;
+  const generatorBounds = useMemo(
+    () =>
+      generatorOpen && targetId
+        ? unionBounds(
+            unionBounds(unitBounds(districtsFile, targetId), drawnRoute ? lineBounds(drawnRoute.candidate.coordinates) : null),
+            startPoint ? lineBounds([startPoint]) : null,
+          )
+        : null,
+    [generatorOpen, targetId, districtsFile, drawnRoute, startPoint],
+  );
+  const fitOverride = useMemo(
+    () => (generatorOpen ? generatorBounds : districtsBbox ? bboxBounds(districtsBbox) : null),
+    [generatorOpen, generatorBounds, districtsBbox],
+  );
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelPadding, setPanelPadding] = useState<CameraPadding | null>(null);
+  const { containerRef, resize, mapRef, mapReady } = useMapRoutes(data, routes, selectedIdx, visibleIndices, ring, isFullscreen, {
+    overlay,
+    fitOverride,
+    fitOverridePadding: generatorOpen ? (panelPadding ?? GENERATOR_PADDING) : MAP_PADDING.districtsFullscreen,
+  });
+  useDistrictsSync(mapRef, mapReady, districtsState);
+  useRouteSync(mapRef, mapReady, routeDrawing);
+
+  // Measured on its layout box: its rise is a transform.
+  useEffect(() => {
+    if (!generatorOpen) return;
+    const measure = () => {
+      const box = containerRef.current?.getBoundingClientRect();
+      const sheet = sheetBoxOf(panelRef.current);
+      if (!box || !sheet) return;
+      const padding = quartierPadding({
+        mapTop: box.top,
+        mapBottom: box.bottom,
+        mapLeft: box.left,
+        mapRight: box.right,
+        sheetTop: sheet.top,
+        sheetBottom: sheet.bottom,
+        sheetLeft: sheet.left,
+        sheetRight: sheet.right,
+      });
+      setPanelPadding((prev) => (samePadding(prev, padding) ? prev : padding));
+    };
+    const frame = requestAnimationFrame(measure);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    if (panelRef.current) observer?.observe(panelRef.current);
+    window.addEventListener("resize", measure);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [generatorOpen, containerRef]);
+  const generatorWasOpen = useRef(generatorOpen);
+  useEffect(() => {
+    if (generatorWasOpen.current === generatorOpen) return;
+    generatorWasOpen.current = generatorOpen;
+    if (generatorOpen) return;
+    const opener = closedOpener.current;
+    closedOpener.current = null;
+    // A quartier's sheet back on screen takes focus itself.
+    if (sheetOpen) return;
+    const back = opener?.element?.isConnected ? opener.element : opener?.fromNextCard ? nextCardRef.current : null;
+    (back ?? expandRef.current)?.focus({ preventScroll: true });
+  }, [generatorOpen, sheetOpen]);
+
+  // Not under the generator, whose panel is the sheet there.
+  useDistrictsTap(
+    mapRef,
+    mapReady,
+    (unitId) => {
+      if (districtsOn && !generatorOpen) setOpenUnitId(unitId);
+    },
+    generatorOpen && startMode === "pick" ? setPickedStart : null,
+  );
+  useQuartierCamera(mapRef, mapReady, openUnit?.id ?? null, districtsFile);
 
   useSetFullscreenChromeHidden(isFullscreen);
 
@@ -132,20 +457,23 @@ export function GlobalMapClient({ data }: Props) {
     resize();
   }, [isFullscreen, resize]);
 
+  // An open quartier sheet takes Escape itself.
   useEffect(() => {
-    if (!isFullscreen) return;
+    if (!isFullscreen || sheetOpen) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setIsFullscreen(false);
+      if (e.key !== "Escape") return;
+      if (generatorOpen) closeGenerator();
+      else setExpanded(false);
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [isFullscreen]);
+  }, [isFullscreen, sheetOpen, generatorOpen, closeGenerator]);
 
   useEffect(() => {
     const token = process.env.NEXT_PUBLIC_MAPTILER_TOKEN;
     if (!token) return;
     let cancelled = false;
-    Promise.all(clusters.map((c) => reverseGeocode(c.center[0], c.center[1], token))).then(
+    Promise.all(clusters.map((c) => reverseGeocode(c.labelPoint[0], c.labelPoint[1], token))).then(
       (results) => {
         if (cancelled) return;
         setNames(clusters.map((c, i) => results[i] ?? coordLabel(c)));
@@ -156,93 +484,203 @@ export function GlobalMapClient({ data }: Props) {
     };
   }, [clusters]);
 
+  const bottom = isFullscreen ? "bottom-[max(env(safe-area-inset-bottom),12px)]" : "bottom-3";
+  const heatSummary = territory
+    ? { runs: territory.routeCount, km: formatKm(territory.km), year: filters.years.length > 0 ? [...filters.years].sort().reverse().join(", ") : t.pages.map.allYears }
+    : undefined;
+  const filterCount = activeFilterCount(filters);
+  const f = t.pages.map.filters;
+  const circle = glassClass("regular", GLASS_CIRCLE);
+  // The base map already credits OpenStreetMap.
+  const districtCredits = useMemo<readonly MapCredit[]>(
+    () => districtsFile?.runomics.sources.filter((src) => !src.label.includes("OpenStreetMap")).map((src) => ({ text: src.label, href: src.url })) ?? NO_CREDITS,
+    [districtsFile],
+  );
+  const credits = districtsOn ? districtCredits : undefined;
+
   return (
-    <div className={isFullscreen ? "fixed inset-0 z-50 bg-background" : "relative h-full w-full"}>
-      {hasMapToken ? (
-        <div ref={containerRef} role="img" aria-label={t.pages.map.title} className="h-full w-full" />
-      ) : (
-        <RoutePreview
-          routes={visibleRoutes}
-          ariaLabel={t.pages.map.routePreview}
-          className="h-full w-full"
-          dense
+    <div
+      className={isFullscreen ? "fixed inset-x-0 bottom-0 top-[var(--safe-top)] z-50 bg-background" : undefined}
+      data-testid="heatmap"
+    >
+      {isFullscreen && (
+        <>
+          {/* What WebKit samples at the top edge, so iOS draws no blur of its
+              own over the row. */}
+          <div data-testid="map-edge-sampler" className="fixed inset-x-0 top-[var(--safe-top)] z-40 h-3 bg-background" />
+        </>
+      )}
+
+      {filtersOpen && (
+        <HeatFilterSheet
+          types={availableTypes}
+          years={data.years}
+          value={filters}
+          count={(next) => areaRuns(next).length}
+          onApply={setFilters}
+          onClose={() => setFiltersOpen(false)}
         />
       )}
+
+      {openUnit && <QuartierSheet unit={openUnit} completeSince={completedSince?.[openUnit.id] ?? null} onClose={closeQuartier} onPlanRun={onPlanRun} />}
 
       <div
-        className={[
-          "absolute inset-x-3 z-10 flex items-start justify-between gap-2",
-          isFullscreen ? "top-[max(env(safe-area-inset-top),12px)]" : "top-3",
-        ].join(" ")}
+        className={
+          isFullscreen
+            ? "absolute inset-0 isolate bg-[var(--surface-2)]"
+            : "relative isolate h-[360px] overflow-hidden rounded-[24px] bg-[var(--surface-2)] md:h-[560px]"
+        }
+        // Marked while the map moves.
+        data-map-root
       >
-        <ClusterPanel
-          clusters={clusters}
-          names={names}
-          stats={clusterStats}
-          selectedIdx={selectedIdx}
-          onSelect={handleSelectCluster}
-        />
-
-        <div className="flex shrink-0 items-start gap-2">
-          {availableTypes.length > 1 && (
-            <TypePicker types={availableTypes} value={selectedType} onChange={setSelectedType} />
-          )}
-          <YearPicker years={data.years} value={selectedYear} onChange={setSelectedYear} />
+        {/* Sized by a wrapper: MapLibre's own stylesheet makes its container
+            position: relative, over any class set on it. */}
+        <div className="absolute inset-0">
+          <div ref={containerRef} role="img" aria-label={t.pages.map.title} className="h-full w-full" />
         </div>
+
+        {/* Inside the map's root, beside the row's glass: over the whole root
+            its tint greys the row out. */}
+        {isFullscreen && (
+          <div aria-hidden="true" data-testid="map-top-edge" className="map-top-edge">
+            <i />
+            <i />
+          </div>
+        )}
+
+        {generatorOpen && districtsArea && generator && (
+          <RouteGeneratorMode
+            area={districtsArea}
+            target={target}
+            tracksReady={districtsCoverage !== null}
+            distanceKm={generator.km}
+            onDistanceChange={setRouteKm}
+            prefs={routePrefs}
+            onPrefsChange={setRoutePrefs}
+            start={routeStart}
+            onStartModeChange={setStartMode}
+            home={districtsHome}
+            paceSecPerKm={generator.pace}
+            plan={generator.plan}
+            today={today}
+            from={generator.from}
+            credits={districtCredits}
+            onClose={closeGenerator}
+            onDrawnChange={setDrawnRoute}
+            panelRef={panelRef}
+          />
+        )}
+
+        {!generatorOpen && (
+          <div
+            data-testid="heat-filter-row"
+            className={cn("absolute z-30 flex items-center gap-2", isFullscreen ? "inset-x-4 top-3" : "inset-x-2.5 top-2.5")}
+          >
+            <ClusterPanel rows={rows} names={names} selectedIdx={selectedIdx} onSelect={handleSelectCluster} />
+            <button
+              type="button"
+              onClick={() => setFiltersOpen(true)}
+              aria-haspopup="dialog"
+              aria-label={filterCount > 0 ? f.buttonActive(filterCount) : f.button}
+              className={circle}
+            >
+              <GlassLayers />
+              <SlidersHorizontal size={20} strokeWidth={2} aria-hidden="true" />
+              {/* top-0, never above: in fullscreen the edge sampler, painted
+                  over the row, cuts it flat. */}
+              {filterCount > 0 && (
+                <span
+                  aria-hidden="true"
+                  data-testid="heat-filter-badge"
+                  className="absolute -right-[3px] top-0 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1 text-[11px] font-bold text-accent-foreground"
+                >
+                  {filterCount}
+                </span>
+              )}
+            </button>
+            <button
+              ref={expandRef}
+              type="button"
+              onClick={() => setExpanded((on) => !on)}
+              aria-label={isFullscreen ? t.pages.map.exitFullscreen : t.pages.map.fullscreen}
+              className={circle}
+            >
+              <GlassLayers />
+              {isFullscreen ? <Minimize size={20} strokeWidth={2} aria-hidden="true" /> : <Maximize size={20} strokeWidth={2} aria-hidden="true" />}
+            </button>
+          </div>
+        )}
+
+
+        {!process.env.NEXT_PUBLIC_MAPTILER_TOKEN && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+            <span className="glass-map-chip px-4 py-2 text-xs font-medium text-subtle">
+              {t.pages.map.mapUnavailable}
+            </span>
+          </div>
+        )}
+
+        {visibleIndices.length === 0 && !generatorOpen && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+            <span className="glass-map-chip px-4 py-2 text-xs font-medium text-subtle">
+              {t.pages.map.noRoutes}
+            </span>
+          </div>
+        )}
+
+        {/* Off under a sheet or its scrim, where they would only cost blur. */}
+        {sheetOpen || generatorOpen || (filtersOpen && districtsOn) ? null : isFullscreen ? (
+          // One column for both layers, so the layers button and the ⓘ never
+          // move under the finger when the layer changes.
+          <div className="pointer-events-none absolute inset-x-6 bottom-[max(24px,var(--safe-bottom))] z-10 flex flex-col items-end gap-2">
+            {districtsArea && <LayersButton on={districtsOn} onToggle={toggleLayer} className="pointer-events-auto" />}
+            {districtsOn ? (
+              // Absolute, so the row keeps the ⓘ's height; 60px is the layers
+              // button's 44 + 16, for a second line (French at 320 pt) to rise
+              // beside it.
+              <div className="relative flex w-full justify-end">
+                <DistrictsLegend className="pointer-events-auto absolute bottom-0 left-0 h-auto min-h-9 max-w-[calc(100%-60px)] flex-wrap gap-y-1 rounded-[18px] py-2" />
+                <MapAttribution className="pointer-events-auto" extraCredits={credits} />
+              </div>
+            ) : (
+              <MapAttribution className="pointer-events-auto" />
+            )}
+            {districtsOn ? (
+              // The unseen heat card holds the box, so the controls above stay
+              // put with or without the next quartier's card.
+              <div className="grid w-full">
+                <HeatLegend space className="col-start-1 row-start-1 w-full" summary={heatSummary} />
+                {nextUnit && (
+                  <NextQuartierCard
+                    ref={nextCardRef}
+                    unit={nextUnit}
+                    onOpen={setOpenUnitId}
+                    onPlanRun={onPlanRun}
+                    className="pointer-events-auto col-start-1 row-start-1 self-end"
+                  />
+                )}
+              </div>
+            ) : (
+              <HeatLegend className="pointer-events-auto w-full" summary={heatSummary} />
+            )}
+          </div>
+        ) : (
+          <div className={`pointer-events-none absolute inset-x-3 z-10 flex flex-wrap items-end gap-x-3 gap-y-1.5 ${bottom}`}>
+            {districtsOn ? <DistrictsLegend className="shrink-0" /> : <HeatLegend className="shrink-0" />}
+            {districtsArea ? (
+              // One flex item with the ⓘ, so a wrapping legend moves up alone.
+              // -mr-0.5 lines it up with the Expand circle (10 pt in, the ⓘ 12);
+              // after it in the DOM, the ⓘ's credits open over it.
+              <div className="ml-auto flex flex-col items-end gap-2.5">
+                <LayersButton on={districtsOn} onToggle={toggleLayer} className="pointer-events-auto -mr-0.5" />
+                <MapAttribution className="pointer-events-auto" extraCredits={credits} />
+              </div>
+            ) : (
+              <MapAttribution className="pointer-events-auto ml-auto" />
+            )}
+          </div>
+        )}
       </div>
-
-      {!hasMapToken && (
-        <span className="glass-map-chip pointer-events-none absolute bottom-3 left-3 z-10 px-3 py-2 text-xs font-medium text-subtle">
-          {t.pages.map.routePreview}
-        </span>
-      )}
-
-      {!worldView && visibleIndices.length === 0 && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-          <span className="glass-map-chip px-4 py-2 text-xs font-medium text-subtle">
-            {t.pages.map.noRoutes}
-          </span>
-        </div>
-      )}
-
-      {worldView ? (
-        <span
-          className={[
-            "glass-map-chip pointer-events-none absolute left-3 z-10 px-3 py-2 text-xs font-medium text-subtle",
-            isFullscreen
-              ? "bottom-[calc(max(env(safe-area-inset-bottom),12px)+2.25rem)]"
-              : "bottom-11",
-          ].join(" ")}
-        >
-          {t.pages.map.worldViewHint}
-        </span>
-      ) : (
-        <HeatLegend isFullscreen={isFullscreen} />
-      )}
-
-      <button
-        onClick={() => setWorldView((w) => !w)}
-        aria-label={worldView ? t.pages.map.exitWorldView : t.pages.map.worldView}
-        aria-pressed={worldView}
-        className={[
-          "glass-map-chip absolute right-3 z-20 flex h-11 w-11 items-center justify-center transition-colors hover:bg-muted",
-          worldView ? "text-accent-text" : "",
-          isFullscreen ? "bottom-[calc(max(env(safe-area-inset-bottom),12px)+3.25rem)]" : "bottom-16",
-        ].join(" ")}
-      >
-        <Globe size={16} />
-      </button>
-
-      <button
-        onClick={() => setIsFullscreen((f) => !f)}
-        aria-label={isFullscreen ? t.pages.map.exitFullscreen : t.pages.map.fullscreen}
-        className={[
-          "glass-map-chip absolute right-3 z-20 flex h-11 w-11 items-center justify-center transition-colors hover:bg-muted",
-          isFullscreen ? "bottom-[max(env(safe-area-inset-bottom),12px)]" : "bottom-3",
-        ].join(" ")}
-      >
-        {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
-      </button>
     </div>
   );
 }

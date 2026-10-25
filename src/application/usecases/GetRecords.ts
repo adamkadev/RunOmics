@@ -1,25 +1,15 @@
 import type { Activity } from '@/domain/activity/types'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { getPbYears } from '@/infrastructure/repositories/JsonPbRepository'
+import { getOfficialRaceResults } from '@/infrastructure/repositories/JsonRaceResultRepository'
+import { creditedEffortSeconds, matchesEffortDistance, officialResultsByActivityId, type OfficialRaceResult } from '@/domain/activity/raceResult'
 import { EFFORTS, DISTANCE_KEY } from '@/domain/activity/effort'
 import { t } from '@/i18n'
+import type { RecordEntry } from '@/domain/race/records'
 
-// Pure (no fs dependency) - re-exported here for existing importers, but client
-// components should import from the domain module directly so they don't pull
-// this file's server-only fs import into the browser bundle.
+export type { RecordEntry } from '@/domain/race/records'
+
 export { EFFORTS, DISTANCE_KEY }
-
-export interface RecordEntry {
-  key: string
-  label: string
-  seconds: number | null
-  paceSecPerKm: number | null
-  distanceKm?: number
-  activityId: string | null
-  date: string | null
-  official: boolean
-  eventName?: string
-}
 
 export interface TopEffortEntry {
   seconds: number
@@ -38,12 +28,16 @@ export interface BestEffort {
   description: string
 }
 
-export function computeBestEfforts(activities: Activity[]): Map<string, BestEffort> {
+export function computeBestEfforts(
+  activities: Activity[],
+  officialResults: OfficialRaceResult[] = getOfficialRaceResults(),
+): Map<string, BestEffort> {
+  const officialByActivityId = officialResultsByActivityId(officialResults)
   const best = new Map<string, BestEffort>()
-  for (const { key } of EFFORTS) {
+  for (const { key, km } of EFFORTS) {
     let entry: BestEffort | null = null
     for (const a of activities) {
-      const sec = a.bestEfforts?.[key]
+      const sec = creditedEffortSeconds(a, key, km, officialByActivityId)
       if (sec != null && (entry === null || sec < entry.seconds)) {
         entry = { seconds: sec, activityId: a.id, date: a.date, description: a.description }
       }
@@ -53,11 +47,22 @@ export function computeBestEfforts(activities: Activity[]): Map<string, BestEffo
   return best
 }
 
+// By the activity list, the same array until the data changes: the records are worked out once per data, not per render.
+const recordsCache = new WeakMap<Activity[], RecordEntry[]>()
+
+/** Shared between callers: read it, never change it. */
 export async function getRecords(): Promise<RecordEntry[]> {
   const activities = getAllActivities()
+  let records = recordsCache.get(activities)
+  if (!records) recordsCache.set(activities, (records = computeRecords(activities)))
+  return records
+}
+
+function computeRecords(activities: Activity[]): RecordEntry[] {
   const pbYears = getPbYears()
   const activityMap = new Map(activities.map((a) => [a.id, a]))
   const computed = computeBestEfforts(activities)
+  const officialByActivityId = officialResultsByActivityId(getOfficialRaceResults())
 
   const officialPbs = new Map<string, { seconds: number; activityId: string | null }>()
   for (const year of pbYears) {
@@ -89,6 +94,9 @@ export async function getRecords(): Promise<RecordEntry[]> {
     }
 
     const best = computed.get(key) ?? null
+    // The winning effort can itself be official: creditedEffortSeconds credits
+    // chip times into the computed set.
+    const bestResult = best?.activityId ? officialByActivityId.get(best.activityId) : undefined
     return {
       key,
       label,
@@ -96,7 +104,7 @@ export async function getRecords(): Promise<RecordEntry[]> {
       paceSecPerKm: best ? Math.round(best.seconds / km) : null,
       activityId: best?.activityId ?? null,
       date: best?.date ?? null,
-      official: false,
+      official: !!bestResult && matchesEffortDistance(bestResult, km),
       eventName: best?.description || undefined,
     }
   })
@@ -142,21 +150,14 @@ export function getMostRecentRecord(records: RecordEntry[]): RecordEntry | null 
 export interface QualifiedEffort {
   key: string
   label: string
-  /** 1 = the current all-time record for this distance; 2/3 = next-best all-time. */
   rank: number
 }
 
-/**
- * Every activity that ranks in the top `topN` all-time for at least one
- * distance, grouped by activityId. Rank 1 comes from `records` (which is
- * official-PB-aware); ranks 2..topN come from the locally-recorded
- * leaderboard (`getTopEfforts`), skipping whichever activity already holds
- * rank 1 for that distance so it isn't double-labeled.
- */
 export function getQualifiedEffortsByActivityId(
   records: RecordEntry[],
   activities: Activity[] = getAllActivities(),
   topN = 3,
+  officialResults: OfficialRaceResult[] = getOfficialRaceResults(),
 ): Record<string, QualifiedEffort[]> {
   const result: Record<string, QualifiedEffort[]> = {}
   const push = (activityId: string, entry: QualifiedEffort) => {
@@ -167,10 +168,11 @@ export function getQualifiedEffortsByActivityId(
   for (const r of records) {
     if (!r.activityId) continue
     rank1ActivityByKey.set(r.key, r.activityId)
+    if (r.official) continue
     push(r.activityId, { key: r.key, label: r.label, rank: 1 })
   }
 
-  const topEfforts = getTopEfforts(activities, topN)
+  const topEfforts = getTopEfforts(activities, topN, officialResults)
   for (const { key, label } of EFFORTS) {
     const officialActivityId = rank1ActivityByKey.get(key)
     for (const [i, entry] of (topEfforts[key] ?? []).entries()) {
@@ -183,13 +185,18 @@ export function getQualifiedEffortsByActivityId(
   return result
 }
 
-export function getTopEfforts(activities: Activity[] = getAllActivities(), n = 5): TopEfforts {
+export function getTopEfforts(
+  activities: Activity[] = getAllActivities(),
+  n = 5,
+  officialResults: OfficialRaceResult[] = getOfficialRaceResults(),
+): TopEfforts {
   const result: TopEfforts = {}
+  const officialByActivityId = officialResultsByActivityId(officialResults)
 
   for (const { key, km } of EFFORTS) {
     const entries = activities
       .flatMap((a) => {
-        const seconds = a.bestEfforts?.[key]
+        const seconds = creditedEffortSeconds(a, key, km, officialByActivityId)
         if (seconds == null) return []
         return [{
           seconds: Math.round(seconds),

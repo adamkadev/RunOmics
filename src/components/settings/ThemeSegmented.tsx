@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import { useTheme } from 'next-themes'
+import { useMounted } from '@/lib/useMounted'
 import { cn } from '@/lib/utils'
+import { SEGMENTED_IDLE_CLASS, SEGMENTED_THUMB_CLASS, SEGMENTED_TRACK_CLASS } from '@/components/ui/SegmentedTabs'
 import { t } from '@/i18n'
 
 const OPTIONS = [
@@ -11,36 +12,32 @@ const OPTIONS = [
   { value: 'dark',   label: () => t.settings.appearance.dark   },
 ] as const
 
+/** A choice, not a tablist (there is no panel), so the buttons are pressed or not. */
 export function ThemeSegmented() {
   const { theme, setTheme } = useTheme()
-  const [mounted, setMounted] = useState(false)
-  const s = t.settings.appearance
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMounted(true)
-  }, [])
-
+  const mounted = useMounted()
   const current = mounted ? theme : undefined
 
   return (
-    <div>
-      <h2 className="text-sm font-bold text-foreground">{s.themeLabel}</h2>
-      <div className="mt-3 flex w-full gap-1 rounded-full bg-foreground/[0.04] p-1">
-        {OPTIONS.map(({ value, label }) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => setTheme(value)}
-            className={cn(
-              'flex-1 min-h-[44px] rounded-full py-1.5 text-xs font-semibold transition-colors',
-              current === value ? 'bg-accent text-accent-foreground' : 'text-foreground/55'
-            )}
-          >
-            {label()}
-          </button>
-        ))}
-      </div>
+    <div
+      className={SEGMENTED_TRACK_CLASS}
+      role="group"
+      aria-label={t.settings.appearance.themeLabel}
+    >
+      {OPTIONS.map(({ value, label }) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => setTheme(value)}
+          aria-pressed={current === value}
+          className={cn(
+            'hit-44 h-[26px] px-3 text-[13px] transition-colors',
+            current === value ? SEGMENTED_THUMB_CLASS : SEGMENTED_IDLE_CLASS
+          )}
+        >
+          {label()}
+        </button>
+      ))}
     </div>
   )
 }

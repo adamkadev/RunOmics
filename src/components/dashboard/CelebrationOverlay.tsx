@@ -6,10 +6,11 @@ import Link from 'next/link'
 import { Trophy } from 'lucide-react'
 import type { RecordEntry } from '@/application/usecases/GetRecords'
 import type { Insight } from '@/lib/gemini'
-import { CELEBRATION_WINDOW_DAYS } from '@/domain/ai/pbCelebrationInsight'
+import { isRecentRecord } from '@/domain/ai/celebrationWindow'
 import { formatDuration, formatDistance } from '@/lib/formatters'
 import { useHaptic } from '@/lib/useHaptic'
 import { useFocusTrap } from '@/lib/useFocusTrap'
+import { useMounted } from '@/lib/useMounted'
 import { CELEBRATION_COLORS } from '@/lib/colors'
 import { t } from '@/i18n'
 
@@ -26,43 +27,40 @@ const CONFETTI = [
   { bottom: '34%', left: '84%', color: GREEN, size: 8, rotate: '-30deg' },
 ] as const
 
-function isRecent(date: string): boolean {
-  const days = (Date.now() - new Date(date + 'T00:00:00').getTime()) / 86_400_000
-  return days >= 0 && days <= CELEBRATION_WINDOW_DAYS
-}
+
 
 export function CelebrationOverlay({ record, aiTake }: { record: RecordEntry | null; aiTake: Insight | null }) {
   const haptic = useHaptic()
   const trapRef = useFocusTrap<HTMLDivElement>()
 
-  const eligible = !!(record?.activityId && record.date && record.seconds !== null && isRecent(record.date))
-  const storageKey = eligible ? `${STORAGE_PREFIX}${record!.activityId}-${record!.key}` : null
-
-  const [visible, setVisible] = useState(
-    () => typeof window !== 'undefined' && !!storageKey && !window.localStorage.getItem(storageKey)
-  )
+  // Decided after mount: it depends on the reader's clock and this browser's localStorage, which the server knows neither of.
+  const mounted = useMounted()
+  const [dismissed, setDismissed] = useState(false)
+  const storageKey =
+    mounted && record?.activityId && record.date && record.seconds !== null && isRecentRecord(record.date, new Date())
+      ? `${STORAGE_PREFIX}${record.activityId}-${record.key}`
+      : null
+  const visible = !dismissed && storageKey !== null && !window.localStorage.getItem(storageKey)
 
   useEffect(() => {
+    // visible only ever turns true once (dismissing is final), so this buzzes once.
     if (visible) haptic('celebration')
-    // Fire once for the initial mount only - not on every `visible` toggle (e.g. dismiss).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [visible, haptic])
 
   if (!visible || !record || record.seconds === null) return null
 
   function dismiss() {
     if (storageKey) window.localStorage.setItem(storageKey, '1')
-    setVisible(false)
+    setDismissed(true)
   }
 
   const s = t.dashboard.celebration
 
   return createPortal(
-    <div className="fixed inset-0 z-[60] flex items-center justify-center" role="dialog" aria-modal="true">
+    <div className="fixed inset-x-0 bottom-0 top-[var(--safe-top)] z-[60] flex items-center justify-center" role="dialog" aria-modal="true">
       <div
         ref={trapRef}
-        className="relative flex h-full w-full flex-col items-center justify-center overflow-hidden px-6 text-center text-white"
-        style={{ background: 'var(--hero-gradient)' }}
+        className="relative flex h-full w-full flex-col items-center justify-center overflow-hidden bg-background px-6 text-center text-foreground"
       >
         {CONFETTI.map((c, i) => (
           <span
@@ -82,13 +80,12 @@ export function CelebrationOverlay({ record, aiTake }: { record: RecordEntry | n
         ))}
 
         <div
-          className="mb-6 flex h-28 w-28 items-center justify-center rounded-full"
-          style={{ background: CELEBRATION_COLORS.burst, boxShadow: CELEBRATION_COLORS.burstGlow }}
+          className="mb-6 flex h-28 w-28 items-center justify-center rounded-full bg-accent"
         >
-          <Trophy size={52} className="text-white" />
+          <Trophy size={52} className="text-accent-foreground" />
         </div>
 
-        <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-emerald-400">{s.eyebrow}</div>
+        <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-accent-text">{s.eyebrow}</div>
         <div className="mb-1 text-2xl font-bold">
           {record.distanceKm ? `${formatDistance(record.distanceKm)} ${t.units.km}` : record.label}
         </div>
@@ -97,21 +94,21 @@ export function CelebrationOverlay({ record, aiTake }: { record: RecordEntry | n
         {aiTake && (
           <div className="mt-5 max-w-xs">
             <p className="text-base font-semibold leading-snug">{aiTake.headline}</p>
-            <p className="mt-1 text-sm leading-snug text-white/70">{aiTake.body}</p>
+            <p className="mt-1 text-sm leading-snug text-muted-foreground">{aiTake.body}</p>
           </div>
         )}
 
         <div className="mt-8 flex w-full max-w-xs gap-2.5">
           <button
             onClick={dismiss}
-            className="flex-1 rounded-2xl bg-white/[0.12] py-3.5 text-sm font-semibold text-white active:scale-95"
+            className="flex-1 rounded-2xl bg-[var(--segmented-track)] py-3.5 text-sm font-semibold text-foreground active:scale-95"
           >
             {s.later}
           </button>
           <Link
             href={record.activityId ? `/activities/${record.activityId}` : '#'}
             onClick={dismiss}
-            className="flex-[1.4] rounded-2xl bg-emerald-500 py-3.5 text-center text-sm font-bold text-emerald-950 active:scale-95"
+            className="flex-[1.4] rounded-2xl bg-accent py-3.5 text-center text-sm font-bold text-accent-foreground active:scale-95"
           >
             {s.viewAndShare}
           </Link>

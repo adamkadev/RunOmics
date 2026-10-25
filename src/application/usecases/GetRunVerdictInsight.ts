@@ -1,60 +1,81 @@
-import { PHASE_PRODUCTION_BUILD } from 'next/constants'
 import type { Activity, PlannedWorkout } from '@/domain/activity/types'
 import { runHistory } from '@/domain/activity/runHistory'
-import { RUN_VERDICT_PREFIX, runVerdictInsightHash, runVerdictSurface, type RunVerdictContext } from '@/domain/ai/runVerdictInsight'
+import type { CoachingPlan } from '@/domain/coaching/types'
+import { sessionIntentOn } from '@/domain/coaching/sessionIntent'
+import { runVerdictInsightHash, runVerdictSurface, type RunVerdictContext } from '@/domain/ai/runVerdictInsight'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
+import { JsonCoachingRepository } from '@/infrastructure/repositories/JsonCoachingRepository'
 import { getAllPlannedWorkouts } from '@/infrastructure/repositories/JsonPlannedWorkoutRepository'
-import {
-  readVerifiedInsight,
-  getCachedInsightsByPrefix,
-  servableInsight,
-  type CachedInsight,
-} from '@/infrastructure/repositories/FirestoreInsightsRepository'
+import { getOfficialRaceResults } from '@/infrastructure/repositories/JsonRaceResultRepository'
+import { officialResultsByActivityId, type OfficialRaceResult } from '@/domain/activity/raceResult'
+import { readVerifiedCachedInsight, readVerifiedInsight } from '@/infrastructure/repositories/FirestoreInsightsRepository'
 import type { Insight } from '@/lib/gemini'
 
-function buildContext(activity: Activity, activities: Activity[], planned: PlannedWorkout[]): RunVerdictContext {
-  return {
-    activity,
-    history: runHistory(activity, activities),
-    planned: planned.find((workout) => workout.date === activity.date.slice(0, 10)) ?? null,
+/**
+ * Archived plans too: a finished block's sessions live only there. A plan that
+ * fails to parse costs the verdicts their coaching intent, never the verdicts.
+ */
+function coachingPlans(): CoachingPlan[] {
+  try {
+    const repository = new JsonCoachingRepository()
+    const current = repository.getCurrentPlan()
+    return [...(current ? [current] : []), ...repository.getArchivedPlans()]
+  } catch (error) {
+    console.error('[run-verdict] coaching plans unreadable', error)
+    return []
   }
 }
 
-/**
- * Every run with the history behind it. The generator needs them all to know
- * which verdicts have gone stale, so the plan and the activity list are read
- * once here rather than once per run.
- */
+function buildContext(
+  activity: Activity,
+  activities: Activity[],
+  planned: PlannedWorkout[],
+  officialResults: OfficialRaceResult[],
+  plans: CoachingPlan[],
+): RunVerdictContext {
+  return {
+    activity,
+    history: runHistory(activity, activities, officialResults),
+    planned: planned.find((workout) => workout.date === activity.date.slice(0, 10)) ?? null,
+    official: officialResultsByActivityId(officialResults).get(activity.id) ?? null,
+    intent: sessionIntentOn(activity.date, plans),
+  }
+}
+
 export function getRunVerdictContexts(): RunVerdictContext[] {
   const activities = getAllActivities()
   const planned = getAllPlannedWorkouts()
-  return activities.map((activity) => buildContext(activity, activities, planned))
+  const officialResults = getOfficialRaceResults()
+  const plans = coachingPlans()
+  return activities.map((activity) => buildContext(activity, activities, planned, officialResults, plans))
 }
 
-// generateStaticParams pre-renders one page per run, all in this one build
-// process - the only place hundreds of individual Firestore reads used to race
-// their own timeout. Fetched once, on first use, and reused for the rest of the
-// build; a live request (ISR revalidation, dev server) never touches it, so a
-// freshly generated verdict is visible the instant readVerifiedInsight sees it.
-let buildVerdicts: Promise<Map<string, CachedInsight>> | null = null
-
-function isProductionBuild(): boolean {
-  return process.env.NEXT_PHASE === PHASE_PRODUCTION_BUILD
-}
-
-/** The AI verdict for one run, or null so the card keeps its rules-based copy. */
 export async function getRunVerdictInsight(activity: Activity): Promise<Insight | null> {
-  const context = buildContext(activity, getAllActivities(), getAllPlannedWorkouts())
-  const surface = runVerdictSurface(activity.id)
-  const hash = runVerdictInsightHash(context)
+  const context = buildContext(activity, getAllActivities(), getAllPlannedWorkouts(), getOfficialRaceResults(), coachingPlans())
+  return readVerifiedInsight(runVerdictSurface(activity.id), runVerdictInsightHash(context))
+}
 
-  if (!isProductionBuild()) return readVerifiedInsight(surface, hash)
-  if (!process.env.FIREBASE_PROJECT_ID) return null
+export interface LatestRunVerdict {
+  activity: Activity
+  verdict: Insight | null
+  generatedAt: string | null
+}
 
-  try {
-    if (!buildVerdicts) buildVerdicts = getCachedInsightsByPrefix(RUN_VERDICT_PREFIX)
-    return servableInsight((await buildVerdicts).get(surface), hash)
-  } catch {
-    return null
+/**
+ * With `generatedAt`: a caller waiting on a just-synced run must tell its
+ * verdict from the one that was there before the sync.
+ */
+export async function getLatestRunVerdict(): Promise<LatestRunVerdict | null> {
+  const activities = getAllActivities()
+  const activity = activities[0]
+  if (!activity) return null
+
+  const context = buildContext(activity, activities, getAllPlannedWorkouts(), getOfficialRaceResults(), coachingPlans())
+  const cached = await readVerifiedCachedInsight(runVerdictSurface(activity.id), runVerdictInsightHash(context))
+
+  return {
+    activity,
+    verdict: cached ? { headline: cached.headline, body: cached.body, bullets: cached.bullets } : null,
+    generatedAt: cached?.generatedAt ?? null,
   }
 }

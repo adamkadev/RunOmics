@@ -1,11 +1,10 @@
 import type { QualifiedEffort } from '@/application/usecases/GetRecords'
 import { EFFORTS as ALL_EFFORTS } from '@/domain/activity/effort'
+import { cardClass } from '@/components/ui/Card'
 import { formatDuration, formatPace } from '@/lib/formatters'
-import { GlassSurface } from '@/components/ui/GlassSurface'
+import { cn } from '@/lib/utils'
 import { t } from '@/i18n'
 
-// Same distances as the Records page, minus the mile: Garmin only reports it
-// sporadically, so it would leave a gap in an otherwise dense row.
 const EFFORTS = ALL_EFFORTS.filter((e) => e.key !== '1mile')
 
 interface Props {
@@ -24,24 +23,28 @@ export function BestEfforts({ bestEfforts, qualifiedEfforts = [] }: Props) {
   if (!entries.length) return null
 
   return (
-    <GlassSurface variant="card" className="p-5">
-      <h3 className="mb-3 text-sm font-semibold text-foreground/80">{s.title}</h3>
-      <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {entries.map(({ key, label, km, seconds, rank }) => {
-          return (
-            <div key={key} className="relative shrink-0 rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5">
-              {rank != null && (
-                <span className="absolute right-2 top-2 rounded-full bg-amber-100 px-1.5 py-[1px] text-micro font-bold text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
-                  {rank === 1 ? s.prBadge : s.rankBadge(rank)}
-                </span>
-              )}
-              <p className="text-xs font-semibold text-subtle">{label}</p>
-              <p className="mt-0.5 text-base font-bold tracking-tight text-foreground">{formatDuration(seconds)}</p>
-              <p className="text-xs text-subtle">{formatPace(Math.round(seconds / km))}</p>
-            </div>
-          )
-        })}
+    <section className={cardClass({ className: 'flex flex-col gap-3' })}>
+      <h3 className="text-headline text-foreground">{s.title}</h3>
+      <div className="grid grid-cols-3 gap-2.5" data-testid="best-efforts">
+        {entries.map(({ key, label, km, seconds, rank }) => (
+          <div key={key} className="relative flex min-w-0 flex-col gap-0.5 rounded-xl bg-[var(--surface-2)] px-3 py-3 sm:px-3.5">
+            <span className="truncate text-xs text-muted-foreground">{s.distances[key] ?? label}</span>
+            <span className="text-lg font-semibold leading-tight text-foreground sm:text-xl">{formatDuration(seconds)}</span>
+            {/* A kilometre's time is its pace, so the 1 km tile says it once. */}
+            {km !== 1 && <span className="truncate text-xs text-muted-foreground">{formatPace(Math.round(seconds / km))}</span>}
+            {rank != null && (
+              <span
+                className={cn(
+                  'absolute right-2.5 top-2.5 text-[11px] font-semibold leading-none',
+                  rank === 1 ? 'text-[var(--pos)]' : 'text-muted-foreground',
+                )}
+              >
+                {rank === 1 ? s.prBadge : s.rankBadge(rank)}
+              </span>
+            )}
+          </div>
+        ))}
       </div>
-    </GlassSurface>
+    </section>
   )
 }

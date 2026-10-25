@@ -18,13 +18,15 @@
   --color-accent-subtle:     var(--accent-subtle);
   --color-accent-text:       var(--accent-text);
   --color-destructive:       var(--destructive);
+  --color-delta-good:        var(--delta-good);
+  --color-delta-warn:        var(--delta-warn);
+  --color-zone-ink:          var(--zone-ink);
   --color-ring:              var(--ring);
-  --font-sans:               var(--font-inter);
-  --font-display:            var(--font-space-grotesk);
-  --font-mono:               var(--font-jetbrains-mono);
-  /* rem, not px: these sizes must follow the browser/OS text-size setting the
-     same way Tailwind's own text-xs/text-sm do, otherwise half the UI scales
-     and half stays pinned. */
+  /* SF Pro through the system stack: Safari switches between the Text and Display optical sizes itself. */
+  --font-sans:               -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-display:            -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  --font-mono:               var(--font-geist);
+  /* rem, not px: these sizes must follow the OS text-size setting as Tailwind's own text-xs/text-sm do. */
   --text-micro:              0.625rem;
   --text-caption:            0.6875rem;
   --text-footnote:           0.8125rem;
@@ -32,21 +34,50 @@
   --text-body:               1.0625rem;
   --text-title2:             1.375rem;
   --text-title1:             1.75rem;
-  --radius-card:             22px;
-  --radius-card-sm:          20px;
-  --radius-control:          10px;
+  /* The iOS type ramp, with SF Pro's tracking. */
+  --text-large-title:                2.125rem;
+  --text-large-title--line-height:   2.5625rem;
+  --text-large-title--letter-spacing: 0.025rem;
+  --text-large-title--font-weight:   700;
+  --text-title-1:                    1.75rem;
+  --text-title-1--line-height:       2.125rem;
+  --text-title-1--letter-spacing:    0.02375rem;
+  --text-title-1--font-weight:       700;
+  --text-metric:                     1.5rem;
+  --text-metric--line-height:        1.8125rem;
+  --text-metric--letter-spacing:     -0.01625rem;
+  --text-metric--font-weight:        700;
+  --text-title-3:                    1.25rem;
+  --text-title-3--line-height:       1.5625rem;
+  --text-title-3--letter-spacing:    -0.028rem;
+  --text-title-3--font-weight:       600;
+  --text-headline:                   1.0625rem;
+  --text-headline--line-height:      1.375rem;
+  --text-headline--letter-spacing:   -0.027rem;
+  --text-headline--font-weight:      600;
+  --text-eyebrow:                    0.75rem;
+  --text-eyebrow--line-height:       1rem;
+  --text-eyebrow--letter-spacing:    0.06em;
+  --text-eyebrow--font-weight:       600;
+  --text-tab:                        0.625rem;
+  --text-tab--line-height:           0.75rem;
+  --text-tab--letter-spacing:        0.0075rem;
+  --radius-card:             24px;
+  --radius-card-sm:          24px;
+  --radius-tile:             12px;
+  --radius-control:          9px;
   --shadow-card:             var(--shadow-card);
-  --animate-fade-up:         fade-up 0.25s ease-out both;
-  --animate-fade-in:         fade-in 0.2s ease-out both;
+  --animate-fade-up:         fade-up 0.25s ease-out backwards;
+  /* backwards, not both: a fill that keeps the animation applied makes the element a backdrop root, which flattens
+     any glass inside it. */
+  --animate-fade-in:         fade-in 0.2s ease-out backwards;
   --animate-sheet-up:        sheet-up 0.42s cubic-bezier(0.22, 1.04, 0.36, 1) both;
-  --animate-cal-forward:     cal-slide-forward 0.22s ease-out both;
-  --animate-cal-backward:    cal-slide-backward 0.22s ease-out both;
+  --animate-cal-forward:     cal-slide-forward 0.22s ease-out backwards;
+  --animate-cal-backward:    cal-slide-backward 0.22s ease-out backwards;
 }
 
-/* margin-left (not transform): see the fade-up comment below - the activity
-   detail page (the forward/backward target here) hosts the map's `fixed
-   inset-0` fullscreen overlay, so this pair needs the same non-transform
-   workaround. */
+/* margin-left, not transform: the activity detail page hosts the map's `fixed inset-0` fullscreen overlay (see
+   fade-up). */
 @keyframes cal-slide-forward {
   from { opacity: 0; margin-left: 28px; }
   to   { opacity: 1; margin-left: 0;    }
@@ -56,11 +87,9 @@
   to   { opacity: 1; margin-left: 0;     }
 }
 
-/* margin-top (not transform): PageTransition wraps every page, including
-   the activity map's `fixed inset-0` fullscreen overlay. A transform here
-   -- even one whose animation has finished -- makes this div a containing
-   block for fixed-position descendants in some browsers, so the "fullscreen"
-   map would size/center against this page wrapper instead of the viewport. */
+/* margin-top, not transform, and filled backwards only: PageTransition wraps the maps' `fixed inset-0` fullscreen
+   overlays, and while an animation applies the browser treats what it animates as will-change. A transform would
+   make this div the containing block of fixed descendants; an opacity, a stacking context under the top scrim. */
 @keyframes fade-up {
   from { opacity: 0; margin-top: 8px; }
   to   { opacity: 1; margin-top: 0;   }
@@ -76,20 +105,15 @@
   to   { opacity: 1; transform: none;             }
 }
 
+/* Transform only: an opacity on a glass sheet would flatten its blur while it animates. */
+@keyframes sheet-rise {
+  from { transform: translateY(100%); }
+  to   { transform: none;             }
+}
+
 @keyframes sheet-down {
   from { opacity: 1; transform: none;             }
   to   { opacity: 0; transform: translateY(100%); }
-}
-
-@keyframes ro-aurora {
-  0%   { transform: translate3d(0, 0, 0) scale(1); }
-  50%  { transform: translate3d(4%, -3%, 0) scale(1.12); }
-  100% { transform: translate3d(0, 0, 0) scale(1); }
-}
-@keyframes ro-aurora2 {
-  0%   { transform: translate3d(0, 0, 0) scale(1.05); }
-  50%  { transform: translate3d(-5%, 4%, 0) scale(1); }
-  100% { transform: translate3d(0, 0, 0) scale(1.05); }
 }
 
 @keyframes ro-shimmer {
@@ -110,445 +134,880 @@
   --blur-md:               18px;
   --blur-lg:               28px;
   --saturate:              1.6;
-  --color-today:           #f1761f;
-  --color-missed:          #e5396b;
+  --color-missed:          var(--neg);
   --safe-top:              env(safe-area-inset-top, 0px);
+  --top-scrim:             calc(var(--safe-top) + 12px);
+  --edge-sample-h:         12px;
+  --bar-h:                 68px;
+  --bar-fade:              18px;
   --safe-bottom:           env(safe-area-inset-bottom, 0px);
+  --tap-min:               44px;
+  --state-ring:            2px;
   --scrim:                 rgba(0, 0, 0, 0.25);
   --scrim-strong:          rgba(0, 0, 0, 0.6);
   --track-on-dark:         rgba(255, 255, 255, 0.08);
   --track-on-dark-strong:  rgba(255, 255, 255, 0.18);
-  --accent-gradient:       linear-gradient(140deg, var(--accent), color-mix(in srgb, var(--accent) 74%, #000000));
   --shadow-toggle:         0 2px 6px rgba(0, 0, 0, 0.28);
   --shadow-modal:          0 8px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
   --shadow-thumb:          0 4px 12px rgba(0, 0, 0, 0.45);
-  --shadow-hero:           0 10px 30px -12px rgba(0, 0, 0, 0.5);
-  --brand-glow:            rgba(30, 215, 135, 0.5);
   --map-attrib-bg:         rgba(0, 0, 0, 0.5);
   --map-attrib-fg:         rgba(255, 255, 255, 0.75);
+  --tab-bar-h:             62px;
+  --tab-bar-side:          24px;
+  --tab-bar-float:         max(calc(var(--safe-bottom) - 10px), 12px);
+  --edge-fade:             30px;
+  --edge-band:             24px;
+  --radius-card:           24px;
+  --radius-tile:           12px;
+  --radius-sheet:          47px;
+  --radius-sheet-large:    38px;
+  --sheet-inset:           8px;
+  --sheet-pad:             22px;
 }
 
-/* ─── Light tokens - Nature (emerald, default) ────── */
+/* ─── Light tokens - Teal (default) ───────────────── */
 :root {
-  --shadow-card:         0 1px 3px 0 rgba(0, 0, 0, 0.06), 0 4px 16px -4px rgba(0, 0, 0, 0.09);
-  --background:          #eef3f0;
-  --card:                #ffffff;
-  --muted:               #f1f5f9;
-  --border:              #e2e8f0;
-  --foreground:          #0f172a;
-  --muted-foreground:    #64748b;
-  --subtle:              #94a3b8;
-  --subtle-2:            #b0bec5;
-  --accent:              #0e9f6e;
-  --accent-hover:        #14b886;
-  --accent-dark:         #0b8a5f;
-  --accent-foreground:   #ffffff;
-  --accent-subtle:       #ecfdf5;
-  --accent-text:         #059669;
-  --accent-on-dark:      #4fe6a0;
-  --destructive:         #ef4444;
-  --ring:                rgba(14, 159, 110, 0.35);
-  --track:               rgba(11, 31, 23, 0.07);
-  --zone-1:              #a7b1aa;
-  --zone-2:              #3b82f6;
-  --zone-3:              #0e9f6e;
-  --zone-4:              #f1761f;
-  --zone-5:              #ff7676;
-  --ro-accent:           #0e9f6e;
-  --ro-accent-hi:        #14b886;
-  --ro-ink:              #0b1f17;
-  --ro-blur:             18px;
-  --ro-text:             #0b1f17;
-  --ro-text-2:           #48564e;
-  --ro-text-3:           #7c8a82;
-  --canvas:              linear-gradient(155deg, #f5f9f7 0%, #eef3f0 100%);
-  --hero-gradient:       linear-gradient(150deg, #0d2e1a, #14532d 70%, #166534);
-  --hero-glow:           transparent;
-  --aurora-1:            #a7f3d6;
-  --aurora-2:            #bcd6ff;
-  --aurora-1-opacity:    0.65;
-  --aurora-2-opacity:    0.6;
-  --aurora-blur:         28px;
-  --glass-sat:           1.4;
-  --glass-bg:            rgba(255, 255, 255, 0.62);
-  --glass-bg-nav:        rgba(255, 255, 255, 0.72);
-  --glass-border:        rgba(255, 255, 255, 0.7);
-  --glass-highlight:     rgba(255, 255, 255, 0.9);
-  --glass-shadow-float:  0 18px 40px -24px rgba(8, 40, 28, 0.35);
-  --glass-shadow-nav:    0 16px 36px -20px rgba(8, 40, 28, 0.35);
-  --glass-fallback:      rgba(255, 255, 255, 0.96);
-  --glass-row-bg:        rgba(255, 255, 255, 0.5);
-  --glass-bg-sheet:      rgba(255, 255, 255, 0.94);
+  --status-bar:              #f3f4f3;
+  --delta-good:              var(--pos);
+  --delta-warn:              var(--warn);
+  --good:                    var(--pos);
+  --destructive:             var(--neg);
+  --metric-fitness:          var(--foreground);
+  --metric-fatigue:          var(--muted-foreground);
+  --tone-go:                 var(--pos);
+  --tone-hold:               var(--warn);
+  --status-peaking:          var(--pos);
+  --form-band-tired:         var(--warn);
+  --form-band-neutral:       var(--muted-foreground);
+  --form-band-fresh:         var(--pos);
+  --form-band-very-fresh:    var(--warn);
+  --form-band-fill-fresh:    var(--pos);
+  --form-band-fill-neutral:  var(--band);
+  --form-band-fill-tired:    var(--warn);
+  --series-2:                var(--band);
+  --series-3:                var(--muted-foreground);
+  --level-rest:              #eceeed;
+  --level-low:               40%;
+  --level-mid:               70%;
+  --zone-ink:                #ffffff;
+  --zone-1:                  #61788f;
+  --zone-2:                  #2f74e0;
+  --zone-3:                  #6a52d9;
+  --zone-4:                  #ae3cc2;
+  --zone-5:                  #d63a77;
+  --chart-cadence:           #4f7471;
+  --chart-easy:              var(--zone-2);
+  --chart-hard:              var(--zone-4);
+  --chart-ground-contact:    #b87d0f;
+  --chart-brand:             var(--accent);
+  --heat-end:                color-mix(in srgb, var(--accent) 45%, #000000);
+  --ro-accent:               var(--accent);
+  --ro-accent-hi:            var(--accent-hover);
+  --ro-ink:                  #0b1f17;
+  --ro-blur:                 18px;
+  --glass-filter:            blur(18px) saturate(2.1) brightness(1.02);
+  --glass-fill:              rgb(255 255 255 / 0.22);
+  --glass-sheen:             rgb(255 255 255 / 0.45);
+  --glass-rim:               linear-gradient(135deg, rgb(255 255 255 / 0.98) 0%, rgb(255 255 255 / 0.5) 28%, rgb(255 255 255 / 0.2) 50%, rgb(255 255 255 / 0.5) 72%, rgb(255 255 255 / 0.9) 100%);
+  --glass-rim-pressed:       linear-gradient(135deg, #ffffff 0%, rgb(255 255 255 / 0.6) 28%, rgb(255 255 255 / 0.3) 50%, rgb(255 255 255 / 0.6) 72%, #ffffff 100%);
+  --glass-inner:             none;
+  --glass-drop:              0 0 0 0.5px rgb(0 0 0 / 0.14), 0 10px 28px rgb(30 40 60 / 0.16), 0 2px 4px rgb(0 0 0 / 0.08);
+  --glass-edge-w:            3px;
+  --glass-edge-filter:       blur(1px) saturate(2) brightness(1.08);
+  --tab-glass-fill:          rgb(255 255 255 / 0.36);
+  --clear-glass-fill:        rgb(255 255 255 / 0.10);
+  --clear-glass-filter:      blur(8px) saturate(1.8);
+  --sheet-glass-fill:        rgb(250 251 250 / 0.55);
+  --sheet-glass-filter:      blur(28px) saturate(2);
+  --sheet-fill:              rgb(0 0 0 / 0.05);
+  --sheet-fill-rim:          none;
+  --sheet-pill:              #ffffff;
+  --sheet-pill-shadow:       0 2px 6px rgb(0 0 0 / 0.08);
+  --radio-ring:              rgb(0 0 0 / 0.22);
+  --glass-text2:             #575c5a;
+  --shadow-sheet:            0 24px 60px rgb(0 0 0 / 0.18);
+  --tab-pill:                rgb(0 0 0 / 0.07);
+  --fill-3:                  rgb(118 118 128 / 0.12);
+  --fill-4:                  rgb(118 118 128 / 0.08);
+  --segmented-track:         var(--fill-3);
+  --segmented-pill:          #ffffff;
+  --segmented-pill-shadow:   0 3px 8px rgb(0 0 0 / 0.12), 0 1px 1px rgb(0 0 0 / 0.04);
+  --card-edge:               0 1px 2px rgb(0 0 0 / 0.04), 0 0 0 0.5px rgb(0 0 0 / 0.04);
+  --row-separator:           rgb(0 0 0 / 0.08);
+  --scrim-sheet:             rgb(20 24 22 / 0.16);
+  --accent:                  #0e8468;
+  --accent-foreground:       #ffffff;
+  --accent-text:             #007c61;
+  --accent-text-glass:       #006951;
+  --accent-hover:            color-mix(in oklab, #0e8468 88%, black);
+  --accent-soft:             #0e84681f;
+  --acc-soft:                #0e84681f;
+  --acc-line:                color-mix(in oklab, #0e8468 55%, transparent);
+  --ring:                    color-mix(in oklab, #0e8468 35%, transparent);
+  --background:              #f3f4f3;
+  --canvas:                  #f3f4f3;
+  --card:                    #ffffff;
+  --raised:                  #ffffff;
+  --popover:                 #ffffff;
+  --muted:                   #f0f1f0;
+  --surface-2:               #f0f1f0;
+  --border:                  #e4e6e5;
+  --divider:                 #e4e6e5;
+  --line-2:                  #d3d6d4;
+  --foreground:              #141615;
+  --text-2:                  #434846;
+  --muted-foreground:        #6b706e;
+  --subtle:                  #6b706e;
+  --subtle-2:                #6b706e;
+  --ro-text:                 #141615;
+  --ro-text-2:               #6b706e;
+  --ro-text-3:               #6b706e;
+  --track:                   #f0f1f0;
+  --heat-empty:              #f0f1f0;
+  --band:                    #8e9491;
+  --rest-bar:                #d9dcdb;
+  --neutral-bar:             #b4b9b7;
+  --axis-text:               #8d9391;
+  --thumb-bg:                #f0f1f0;
+  --tab-bar-bg:              #ffffff;
+  --tab-bar-hairline:        #e4e6e5;
+  --pos:                     #0f7a52;
+  --warn:                    #9a5b00;
+  --neg:                     #c0352a;
+  --tone-caution:            #9a5b00;
+  --shadow-card:             none;
+  --shadow-raised:           0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-hero:             none;
+  --hero-gradient:           #ffffff;
+  --hero-glow:               transparent;
+  --glass-sat:               1;
+  --glass-bg:                #ffffff;
+  --glass-border:            #e4e6e5;
+  --glass-highlight:         transparent;
+  --glass-shadow-float:      none;
+  --glass-shadow-nav:        none;
+  --glass-fallback:          #ffffff;
+  --glass-row-bg:            #ffffff;
+  --glass-bg-sheet:          #ffffff;
+  --glass-bg-nav:            #ffffff;
 }
 
-/* ─── Dark tokens - Nature (emerald, default) ─────── */
+/* ─── Dark tokens - Teal (default) ────────────────── */
 .dark {
-  --shadow-card:         0 1px 2px 0 rgba(0, 0, 0, 0.35), 0 4px 16px -4px rgba(0, 0, 0, 0.7), inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
-  --background:          #060a08;
-  --card:                #0d110f;
-  --muted:               rgba(255, 255, 255, 0.05);
-  --border:              rgba(255, 255, 255, 0.07);
-  --foreground:          #eef2f0;
-  --muted-foreground:    #a8b4ae;
-  --subtle:              #8a978f;
-  --subtle-2:            #6b7a74;
-  --accent:              #1ed787;
-  --accent-hover:        #4fe6a0;
-  --accent-dark:         #0b9c63;
-  --accent-foreground:   #052015;
-  --accent-subtle:       rgba(30, 215, 135, 0.1);
-  --accent-text:         #4fe6a0;
-  --accent-on-dark:      #4fe6a0;
-  --destructive:         #f87171;
-  --ring:                rgba(30, 215, 135, 0.7);
-  --track:               rgba(255, 255, 255, 0.08);
-  --zone-1:              rgba(255, 255, 255, 0.55);
-  --zone-2:              #7db8ff;
-  --zone-3:              #4fe6a0;
-  --zone-4:              #ff9a5a;
-  --zone-5:              #ff7676;
-  --ro-text:             #eef2f0;
-  --ro-text-2:           #a8b4ae;
-  --ro-text-3:           #8a978f;
-  --canvas:              linear-gradient(155deg, #07100c 0%, #060a08 100%);
-  --hero-gradient:       linear-gradient(155deg, rgba(30, 215, 135, 0.3), rgba(30, 215, 135, 0.1) 55%, rgba(30, 215, 135, 0.03));
-  --hero-glow:           rgba(30, 215, 135, 0.28);
-  --aurora-1:            #1ed787;
-  --aurora-2:            #1276b8;
-  --aurora-1-opacity:    0.16;
-  --aurora-2-opacity:    0.12;
-  --aurora-blur:         30px;
-  --glass-sat:           1.4;
-  --glass-bg:            rgba(255, 255, 255, 0.03);
-  --glass-bg-nav:        rgba(6, 10, 8, 0.6);
-  --glass-border:        rgba(255, 255, 255, 0.07);
-  --glass-highlight:     rgba(255, 255, 255, 0.05);
-  --glass-shadow-float:  0 24px 50px -26px rgba(0, 0, 0, 0.7);
-  --glass-shadow-nav:    0 16px 36px -18px rgba(0, 0, 0, 0.8);
-  --glass-fallback:      #0d110f;
-  --glass-row-bg:        rgba(255, 255, 255, 0.03);
-  --glass-bg-sheet:      rgba(6, 10, 8, 0.92);
+  --status-bar:              #0b0c0c;
+  --delta-good:              var(--pos);
+  --delta-warn:              var(--warn);
+  --good:                    var(--pos);
+  --destructive:             var(--neg);
+  --metric-fitness:          var(--foreground);
+  --metric-fatigue:          var(--muted-foreground);
+  --tone-go:                 var(--pos);
+  --tone-hold:               var(--warn);
+  --status-peaking:          var(--pos);
+  --form-band-tired:         var(--warn);
+  --form-band-neutral:       var(--muted-foreground);
+  --form-band-fresh:         var(--pos);
+  --form-band-very-fresh:    var(--warn);
+  --form-band-fill-fresh:    var(--pos);
+  --form-band-fill-neutral:  var(--band);
+  --form-band-fill-tired:    var(--warn);
+  --series-2:                var(--band);
+  --series-3:                var(--muted-foreground);
+  --level-rest:              #262928;
+  --level-low:               35%;
+  --level-mid:               65%;
+  --zone-ink:                #0b1f17;
+  --zone-1:                  #8a9bb0;
+  --zone-2:                  #5b9cf5;
+  --zone-3:                  #8f7cf0;
+  --zone-4:                  #c77ae6;
+  --zone-5:                  #f07aa8;
+  --chart-cadence:           #8fb3b0;
+  --chart-easy:              var(--zone-2);
+  --chart-hard:              var(--zone-4);
+  --chart-ground-contact:    #f59e0b;
+  --chart-brand:             var(--accent);
+  --heat-end:                color-mix(in srgb, var(--accent) 35%, #ffffff);
+  --ro-accent:               var(--accent);
+  --ro-accent-hi:            var(--accent-hover);
+  --ro-ink:                  #0b1f17;
+  --ro-blur:                 18px;
+  --glass-filter:            blur(12px) saturate(1.9) brightness(1.1);
+  --glass-fill:              rgb(42 46 45 / 0.46);
+  --glass-sheen:             rgb(255 255 255 / 0.09);
+  --glass-rim:               linear-gradient(135deg, rgb(255 255 255 / 0.42) 0%, rgb(255 255 255 / 0.1) 26%, rgb(255 255 255 / 0) 50%, rgb(255 255 255 / 0.06) 74%, rgb(255 255 255 / 0.24) 100%);
+  --glass-rim-pressed:       linear-gradient(135deg, rgb(255 255 255 / 0.6) 0%, rgb(255 255 255 / 0.14) 26%, rgb(255 255 255 / 0) 50%, rgb(255 255 255 / 0.1) 74%, rgb(255 255 255 / 0.34) 100%);
+  --glass-inner:             inset 0 0 8px rgb(255 255 255 / 0.05);
+  --glass-drop:              0 10px 30px rgb(0 0 0 / 0.45), 0 2px 6px rgb(0 0 0 / 0.30);
+  --glass-edge-w:            3px;
+  --glass-edge-filter:       blur(1px) saturate(2.2) brightness(1.25);
+  --tab-glass-fill:          rgb(34 38 37 / 0.60);
+  --clear-glass-fill:        rgb(16 18 18 / 0.22);
+  --clear-glass-filter:      blur(5px) saturate(1.6) brightness(0.9);
+  --sheet-glass-fill:        rgb(28 31 31 / 0.80);
+  --sheet-glass-filter:      blur(28px) saturate(1.8);
+  --sheet-fill:              rgb(255 255 255 / 0.10);
+  --sheet-fill-rim:          inset 0 0.5px 0 rgb(255 255 255 / 0.25);
+  --sheet-pill:              rgb(255 255 255 / 0.18);
+  --sheet-pill-shadow:       inset 0 0.5px 0 rgb(255 255 255 / 0.3);
+  --radio-ring:              rgb(255 255 255 / 0.35);
+  --shadow-sheet:            0 24px 60px rgb(0 0 0 / 0.35);
+  --tab-pill:                rgb(255 255 255 / 0.11);
+  --fill-3:                  rgb(118 118 128 / 0.24);
+  --fill-4:                  rgb(118 118 128 / 0.18);
+  --segmented-track:         var(--fill-3);
+  --segmented-pill:          #4b504f;
+  --segmented-pill-shadow:   0 2px 6px rgb(0 0 0 / 0.35);
+  --card-edge:               inset 0 0 0 0.5px rgb(255 255 255 / 0.07);
+  --row-separator:           rgb(255 255 255 / 0.08);
+  --scrim-sheet:             rgb(0 0 0 / 0.45);
+  --accent:                  #2dd4a7;
+  --accent-foreground:       #07261d;
+  --accent-text:             #2dd4a7;
+  --accent-text-glass:       #2dd4a7;
+  --accent-hover:            color-mix(in oklab, #2dd4a7 88%, white);
+  --accent-soft:             #2dd4a71f;
+  --acc-soft:                #2dd4a71f;
+  --acc-line:                color-mix(in oklab, #2dd4a7 55%, transparent);
+  --ring:                    color-mix(in oklab, #2dd4a7 70%, transparent);
+  --background:              #0b0c0c;
+  --canvas:                  #0b0c0c;
+  --card:                    #141616;
+  --raised:                  #1a1d1d;
+  --popover:                 #1a1d1d;
+  --muted:                   #0f1111;
+  --surface-2:               #0f1111;
+  --border:                  #232626;
+  --divider:                 #1f2222;
+  --line-2:                  #303432;
+  --foreground:              #f2f4f3;
+  --text-2:                  #a3aaa7;
+  --muted-foreground:        #8d9391;
+  --subtle:                  #7f8482;
+  --subtle-2:                #7f8482;
+  --ro-text:                 #f2f4f3;
+  --ro-text-2:               #8d9391;
+  --ro-text-3:               #7f8482;
+  --track:                   #262a29;
+  --heat-empty:              #262a29;
+  --band:                    #6a706d;
+  --rest-bar:                #3a3f3e;
+  --neutral-bar:             #5b6260;
+  --axis-text:               #6b7270;
+  --thumb-bg:                #0f1111;
+  --tab-bar-bg:              #0d0f0f;
+  --tab-bar-hairline:        #1f2222;
+  --pos:                     #2dd4a7;
+  --warn:                    #f0b73c;
+  --neg:                     #ff8a80;
+  --tone-caution:            #f0b73c;
+  --shadow-card:             none;
+  --shadow-raised:           none;
+  --shadow-hero:             none;
+  --hero-gradient:           #141616;
+  --hero-glow:               transparent;
+  --glass-sat:               1;
+  --glass-bg:                #141616;
+  --glass-border:            #232626;
+  --glass-highlight:         transparent;
+  --glass-shadow-float:      none;
+  --glass-shadow-nav:        none;
+  --glass-fallback:          #141616;
+  --glass-row-bg:            #141616;
+  --glass-bg-sheet:          #141616;
+  --glass-bg-nav:            #0d0f0f;
 }
 
-[data-accent="performance"] {
-  --accent:             #3b82f6;
-  --accent-hover:       #60a5fa;
-  --accent-dark:        #2563eb;
+[data-accent="cyan"] {
+  --accent:             #0e7f9b;
   --accent-foreground:  #ffffff;
-  --accent-subtle:      #eff6ff;
-  --accent-text:        #2563eb;
-  --accent-on-dark:     #93c5fd;
-  --ring:               rgba(59, 130, 246, 0.35);
-  --hero-gradient:      linear-gradient(150deg, #0c1f3f, #1e3a8a 70%, #1d4ed8);
-  --hero-glow:          transparent;
-  --aurora-1:           #93c5fd;
-  --aurora-2:           #bae6fd;
-  --background:         #eff6ff;
-  --canvas:             linear-gradient(155deg, #f0f8ff 0%, #eff6ff 100%);
+  --accent-text:        #007793;
+  --accent-text-glass:  #00657c;
+  --accent-hover:       color-mix(in oklab, #0e7f9b 88%, black);
+  --accent-soft:        #0e7f9b1f;
+  --acc-soft:           #0e7f9b1f;
+  --acc-line:           color-mix(in oklab, #0e7f9b 55%, transparent);
+  --ring:               color-mix(in oklab, #0e7f9b 35%, transparent);
 }
 
-.dark[data-accent="performance"] {
-  --accent:             #60a5fa;
-  --accent-hover:       #93c5fd;
-  --accent-dark:        #3b82f6;
-  --accent-foreground:  #04122b;
-  --accent-subtle:      rgba(96, 165, 250, 0.1);
-  --accent-text:        #93c5fd;
-  --accent-on-dark:     #93c5fd;
-  --ring:               rgba(96, 165, 250, 0.7);
-  --destructive:        #f87171;
-  --hero-gradient:      linear-gradient(155deg, rgba(96, 165, 250, 0.3), rgba(96, 165, 250, 0.1) 55%, rgba(96, 165, 250, 0.03));
-  --hero-glow:          rgba(96, 165, 250, 0.28);
-  --aurora-1:           #1d4ed8;
-  --aurora-2:           #0284c7;
-  --background:         #06091a;
-  --canvas:             linear-gradient(155deg, #070d20 0%, #06091a 100%);
+.dark[data-accent="cyan"] {
+  --accent:             #5fd4f0;
+  --accent-foreground:  #07261d;
+  --accent-text:        #5fd4f0;
+  --accent-text-glass:  #5fd4f0;
+  --accent-hover:       color-mix(in oklab, #5fd4f0 88%, white);
+  --accent-soft:        #5fd4f01f;
+  --acc-soft:           #5fd4f01f;
+  --acc-line:           color-mix(in oklab, #5fd4f0 55%, transparent);
+  --ring:               color-mix(in oklab, #5fd4f0 70%, transparent);
 }
 
-[data-accent="impact"] {
-  --accent:             #f43f5e;
-  --accent-hover:       #fb7185;
-  --accent-dark:        #e11d48;
+[data-accent="violet"] {
+  --accent:             #7a4fd1;
   --accent-foreground:  #ffffff;
-  --accent-subtle:      #fff1f2;
-  --accent-text:        #e11d48;
-  --accent-on-dark:     #fda4af;
-  --ring:               rgba(244, 63, 94, 0.35);
-  --destructive:        #dc2626;
-  --hero-gradient:      linear-gradient(150deg, #2b0712, #6f1030 70%, #9f1239);
-  --hero-glow:          transparent;
-  --aurora-1:           #fda4af;
-  --aurora-2:           #fbcfe8;
-  --background:         #fff1f2;
-  --canvas:             linear-gradient(155deg, #fff5f6 0%, #fff1f2 100%);
+  --accent-text:        #7a4fd1;
+  --accent-text-glass:  #6d40c2;
+  --accent-hover:       color-mix(in oklab, #7a4fd1 88%, black);
+  --accent-soft:        #7a4fd11f;
+  --acc-soft:           #7a4fd11f;
+  --acc-line:           color-mix(in oklab, #7a4fd1 55%, transparent);
+  --ring:               color-mix(in oklab, #7a4fd1 35%, transparent);
 }
 
-.dark[data-accent="impact"] {
-  --accent:             #fb7185;
-  --accent-hover:       #fda4af;
-  --accent-dark:        #f43f5e;
-  --accent-foreground:  #2b040c;
-  --accent-subtle:      rgba(251, 113, 133, 0.1);
-  --accent-text:        #fda4af;
-  --accent-on-dark:     #fda4af;
-  --ring:               rgba(251, 113, 133, 0.7);
-  --destructive:        #f87171;
-  --hero-gradient:      linear-gradient(155deg, rgba(251, 113, 133, 0.3), rgba(251, 113, 133, 0.1) 55%, rgba(251, 113, 133, 0.03));
-  --hero-glow:          rgba(251, 113, 133, 0.28);
-  --aurora-1:           #be185d;
-  --aurora-2:           #9d174d;
-  --background:         #130608;
-  --canvas:             linear-gradient(155deg, #190a0d 0%, #130608 100%);
+.dark[data-accent="violet"] {
+  --accent:             #b794f6;
+  --accent-foreground:  #07261d;
+  --accent-text:        #b794f6;
+  --accent-text-glass:  #b794f6;
+  --accent-hover:       color-mix(in oklab, #b794f6 88%, white);
+  --accent-soft:        #b794f61f;
+  --acc-soft:           #b794f61f;
+  --acc-line:           color-mix(in oklab, #b794f6 55%, transparent);
+  --ring:               color-mix(in oklab, #b794f6 70%, transparent);
 }
 
-[data-accent="motivation"] {
-  --accent:             #f97316;
-  --accent-hover:       #fb923c;
-  --accent-dark:        #ea580c;
+[data-accent="pink"] {
+  --accent:             #c23a83;
   --accent-foreground:  #ffffff;
-  --accent-subtle:      #fff7ed;
-  --accent-text:        #ea580c;
-  --accent-on-dark:     #fdba74;
-  --ring:               rgba(249, 115, 22, 0.35);
-  --destructive:        #ef4444;
-  --hero-gradient:      linear-gradient(150deg, #33110a, #5f2510 70%, #983811);
-  --hero-glow:          transparent;
-  --aurora-1:           #fdba74;
-  --aurora-2:           #fde68a;
-  --background:         #fff7ed;
-  --canvas:             linear-gradient(155deg, #fffaf3 0%, #fff7ed 100%);
+  --accent-text:        #bf3780;
+  --accent-text-glass:  #aa206e;
+  --accent-hover:       color-mix(in oklab, #c23a83 88%, black);
+  --accent-soft:        #c23a831f;
+  --acc-soft:           #c23a831f;
+  --acc-line:           color-mix(in oklab, #c23a83 55%, transparent);
+  --ring:               color-mix(in oklab, #c23a83 35%, transparent);
 }
 
-.dark[data-accent="motivation"] {
-  --accent:             #fb923c;
-  --accent-hover:       #fdba74;
-  --accent-dark:        #f97316;
-  --accent-foreground:  #2b1203;
-  --accent-subtle:      rgba(251, 146, 60, 0.1);
-  --accent-text:        #fdba74;
-  --accent-on-dark:     #fdba74;
-  --ring:               rgba(251, 146, 60, 0.7);
-  --destructive:        #f87171;
-  --hero-gradient:      linear-gradient(155deg, rgba(251, 146, 60, 0.3), rgba(251, 146, 60, 0.1) 55%, rgba(251, 146, 60, 0.03));
-  --hero-glow:          rgba(251, 146, 60, 0.28);
-  --aurora-1:           #c2410c;
-  --aurora-2:           #b45309;
-  --background:         #130a04;
-  --canvas:             linear-gradient(155deg, #1a1007 0%, #130a04 100%);
+.dark[data-accent="pink"] {
+  --accent:             #f58ac0;
+  --accent-foreground:  #07261d;
+  --accent-text:        #f58ac0;
+  --accent-text-glass:  #f58ac0;
+  --accent-hover:       color-mix(in oklab, #f58ac0 88%, white);
+  --accent-soft:        #f58ac01f;
+  --acc-soft:           #f58ac01f;
+  --acc-line:           color-mix(in oklab, #f58ac0 55%, transparent);
+  --ring:               color-mix(in oklab, #f58ac0 70%, transparent);
 }
 
-[data-accent="endurance"] {
-  --accent:             #8b5cf6;
-  --accent-hover:       #a78bfa;
-  --accent-dark:        #7c3aed;
+[data-accent="mono"] {
+  --accent:             #1a1c1b;
   --accent-foreground:  #ffffff;
-  --accent-subtle:      #f5f3ff;
-  --accent-text:        #7c3aed;
-  --accent-on-dark:     #c4b5fd;
-  --ring:               rgba(139, 92, 246, 0.35);
-  --hero-gradient:      linear-gradient(150deg, #1e1038, #4c1d95 70%, #6d28d9);
-  --hero-glow:          transparent;
-  --aurora-1:           #c4b5fd;
-  --aurora-2:           #e9d5ff;
-  --background:         #f5f3ff;
-  --canvas:             linear-gradient(155deg, #faf8ff 0%, #f5f3ff 100%);
+  --accent-text:        #1a1c1b;
+  --accent-text-glass:  #1a1c1b;
+  --accent-hover:       color-mix(in oklab, #1a1c1b 88%, black);
+  --accent-soft:        #1a1c1b1f;
+  --acc-soft:           #1a1c1b1f;
+  --acc-line:           color-mix(in oklab, #1a1c1b 55%, transparent);
+  --ring:               color-mix(in oklab, #1a1c1b 35%, transparent);
 }
 
-.dark[data-accent="endurance"] {
-  --accent:             #a78bfa;
-  --accent-hover:       #c4b5fd;
-  --accent-dark:        #8b5cf6;
-  --accent-foreground:  #170b2e;
-  --accent-subtle:      rgba(167, 139, 250, 0.1);
-  --accent-text:        #c4b5fd;
-  --accent-on-dark:     #c4b5fd;
-  --ring:               rgba(167, 139, 250, 0.7);
-  --destructive:        #f87171;
-  --hero-gradient:      linear-gradient(155deg, rgba(167, 139, 250, 0.3), rgba(167, 139, 250, 0.1) 55%, rgba(167, 139, 250, 0.03));
-  --hero-glow:          rgba(167, 139, 250, 0.28);
-  --aurora-1:           #6d28d9;
-  --aurora-2:           #7e22ce;
-  --background:         #0d0a1a;
-  --canvas:             linear-gradient(155deg, #120f21 0%, #0d0a1a 100%);
-}
-
-[data-accent="silver"] {
-  --accent:             #64748b;
-  --accent-hover:       #94a3b8;
-  --accent-dark:        #475569;
-  --accent-foreground:  #ffffff;
-  --accent-subtle:      #f1f5f9;
-  --accent-text:        #475569;
-  --accent-on-dark:     #cbd5e1;
-  --ring:               rgba(100, 116, 139, 0.35);
-  --hero-gradient:      linear-gradient(150deg, #0f172a, #1e293b 70%, #334155);
-  --hero-glow:          transparent;
-  --aurora-1:           #cbd5e1;
-  --aurora-2:           #e2e8f0;
-  --background:         #f8fafc;
-  --canvas:             linear-gradient(155deg, #fafbfc 0%, #f1f5f9 100%);
-}
-
-.dark[data-accent="silver"] {
-  --accent:             #94a3b8;
-  --accent-hover:       #cbd5e1;
-  --accent-dark:        #64748b;
-  --accent-foreground:  #0b1220;
-  --accent-subtle:      rgba(148, 163, 184, 0.1);
-  --accent-text:        #cbd5e1;
-  --accent-on-dark:     #cbd5e1;
-  --ring:               rgba(203, 213, 225, 0.5);
-  --destructive:        #f87171;
-  --hero-gradient:      linear-gradient(155deg, rgba(148, 163, 184, 0.3), rgba(148, 163, 184, 0.1) 55%, rgba(148, 163, 184, 0.03));
-  --hero-glow:          rgba(148, 163, 184, 0.28);
-  --aurora-1:           #334155;
-  --aurora-2:           #1e293b;
-  --aurora-1-opacity:   0.6;
-  --aurora-2-opacity:   0.5;
-  --background:         #080c10;
-  --canvas:             linear-gradient(155deg, #0d1117 0%, #080c10 100%);
-}
-
-[data-page-aurora="goals"] {
-  --aurora-1:          #0e9f6e;
-  --aurora-2:          #8257e6;
-  --aurora-1-opacity:  0.45;
-  --aurora-2-opacity:  0.32;
-}
-
-.dark [data-page-aurora="goals"] {
-  --aurora-1-opacity:  0.2;
-  --aurora-2-opacity:  0.14;
-}
-
-[data-page-aurora="records"] {
-  --aurora-1:          #8257e6;
-  --aurora-2:          #0e9f6e;
-  --aurora-1-opacity:  0.42;
-  --aurora-2-opacity:  0.34;
-}
-
-.dark [data-page-aurora="records"] {
-  --aurora-1-opacity:  0.18;
-  --aurora-2-opacity:  0.15;
-}
-
-[data-page-aurora="shoes"] {
-  --aurora-1:          #f1761f;
-  --aurora-2:          #0e9f6e;
-  --aurora-1-opacity:  0.38;
-  --aurora-2-opacity:  0.34;
-}
-
-.dark [data-page-aurora="shoes"] {
-  --aurora-1-opacity:  0.16;
-  --aurora-2-opacity:  0.15;
-}
-
-[data-page-aurora="settings"] {
-  --aurora-1:          #e5396b;
-  --aurora-2:          #8257e6;
-  --aurora-1-opacity:  0.34;
-  --aurora-2-opacity:  0.28;
-}
-
-.dark [data-page-aurora="settings"] {
-  --aurora-1-opacity:  0.14;
-  --aurora-2-opacity:  0.12;
-}
-
-[data-page-aurora="analytics"] {
-  --aurora-1:          #1276b8;
-  --aurora-2:          #0e9f6e;
-  --aurora-1-opacity:  0.42;
-  --aurora-2-opacity:  0.32;
-}
-
-.dark [data-page-aurora="analytics"] {
-  --aurora-1-opacity:  0.18;
-  --aurora-2-opacity:  0.14;
+.dark[data-accent="mono"] {
+  --accent:             #edefee;
+  --accent-foreground:  #0c0d0d;
+  --accent-text:        #edefee;
+  --accent-text-glass:  #edefee;
+  --accent-hover:       color-mix(in oklab, #edefee 88%, white);
+  --accent-soft:        #edefee1f;
+  --acc-soft:           #edefee1f;
+  --acc-line:           color-mix(in oklab, #edefee 55%, transparent);
+  --ring:               color-mix(in oklab, #edefee 70%, transparent);
 }
 
 /* ─── END GENERATED ─── */
 
-/* ─── Liquid glass surfaces ────────────────────────── */
+/* In the components layer, not unlayered: a utility on the wrapper (fixed, rounded-[47px]) has to beat the object's
+   own position and radius.
+
+   WebKit rules this obeys (do not break them):
+   1. A glass object is a positioned wrapper - no backdrop-filter, opacity
+      < 1, filter, mask, clip-path or will-change on it or any ancestor -
+      holding SIBLING layers: .lg-blur, .lg-edge, .lg-tint, then content.
+   2. Never a backdrop-filter inside another backdrop-filter element: the
+      inner one would only blur its parent.
+   3. Animate the wrapper's transform or its children's opacity, never a
+      blur radius. At most 6 live backdrop-filters on screen at once.
+   Refraction (backdrop-filter: url(#svg)) is Chromium-only; the 3 px
+   .lg-edge band is its stand-in. */
 @layer components {
-  .glass-card,
+  /* <div class="lg [lg-tab|lg-clear|lg-sheet]">
+       <i class="lg-blur"></i><i class="lg-edge"></i><i class="lg-tint"></i>
+       ...content...
+     </div>                                         (ui/GlassSurface <Glass>) */
+  .lg {
+    position: relative;
+    border-radius: 9999px;
+    box-shadow: var(--glass-drop);
+    transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .lg > i {
+    position: absolute;
+    inset: 0;
+    display: block;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+  .lg > :not(i) { position: relative; }
+
+  .lg > .lg-blur {
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
+  }
+
+  .lg > .lg-edge {
+    padding: var(--glass-edge-w);
+    -webkit-backdrop-filter: var(--glass-edge-filter);
+    backdrop-filter: var(--glass-edge-filter);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  }
+
+  .lg > .lg-tint {
+    background:
+      linear-gradient(180deg, var(--glass-sheen) 0%, transparent 55%),
+      var(--glass-fill);
+    box-shadow: var(--glass-inner);
+    transition: filter 120ms ease-out, box-shadow 150ms ease-out;
+  }
+  .lg > .lg-tint::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: var(--glass-rim);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+    transition: opacity 120ms ease-out;
+  }
+
+  /* A blur over a WebGL canvas is redrawn on every frame of a pan or zoom, so under [data-map-moving] the glass drops
+     its blur and edge band. The blur's radius is never animated, its layer's opacity is. */
+  .lg > .lg-blur,
+  .lg > .lg-edge { transition: opacity 150ms ease-out; }
+  [data-map-moving] .lg {
+    --glass-filter: none;
+    --glass-edge-filter: none;
+  }
+  [data-map-moving] .lg > .lg-blur,
+  [data-map-moving] .lg > .lg-edge { opacity: 0; transition: none; }
+  [data-map-moving] .lg > .lg-tint {
+    box-shadow: inset 0 0 0 100vmax color-mix(in srgb, var(--raised) 25%, transparent);
+  }
+
+  .lg-tab   { --glass-fill: var(--tab-glass-fill); }
+  .lg-sheet { --glass-fill: var(--sheet-glass-fill); --glass-filter: var(--sheet-glass-filter); box-shadow: var(--shadow-sheet); }
+  .lg-sheet > .lg-tint {
+    background:
+      linear-gradient(180deg, var(--glass-sheen) 0%, transparent 28%),
+      var(--glass-fill);
+  }
+  .lg-sheet {
+    --segmented-track: var(--sheet-fill);
+    --segmented-pill: var(--sheet-pill);
+    --segmented-pill-shadow: var(--sheet-pill-shadow);
+  }
+  .lg-clear {
+    --glass-fill: var(--clear-glass-fill);
+    --glass-filter: var(--clear-glass-filter);
+  }
+
+  /* Light glass reads darker than the page under a sheet's scrim or a selected platter, so its secondary and accent
+     text take their glass shades, 4.5:1 there. */
+  html:not(.dark) :is(.lg, .on-aura) {
+    --muted-foreground: var(--glass-text2);
+    --subtle: var(--glass-text2);
+    --accent-text: var(--accent-text-glass);
+  }
+
+  /* Glass swells and brightens when pressed, never fades: an opacity would flatten its blur. */
+  .lg:is(button, a):not(:disabled):active,
+  .lg[data-pressed] {
+    transform: scale(1.06);
+    transition-duration: 120ms;
+    transition-timing-function: ease-out;
+  }
+  .lg:is(button, a):not(:disabled):active > .lg-tint,
+  .lg[data-pressed] > .lg-tint { filter: brightness(1.12); }
+  .lg:is(button, a):not(:disabled):active > .lg-tint::after,
+  .lg[data-pressed] > .lg-tint::after { opacity: 1; background: var(--glass-rim-pressed); }
+
+  /* Its layers and content take the animation, never the wrapper, whose opacity would flatten the blur. */
+  .lg.lg-fade-in > * { animation: fade-in 150ms ease-out both; }
+
+  /* A sticky strip's control as it sticks: its glass layers fade in, never the wrapper. */
+  .lg.lg-stuck-in > i { animation: fade-in 120ms ease-out backwards; }
+  .lg.lg-stuck-in {
+    transition:
+      transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      box-shadow 120ms ease-out,
+      background-color 120ms ease-out;
+  }
+
+  /* A glass group (the hero's expand + share): its buttons are plain, so the group swells as one. */
+  .lg:has(> .lg-press:not(:disabled):active) { transform: scale(1.06); transition-duration: 120ms; transition-timing-function: ease-out; }
+  .lg:has(> .lg-press:not(:disabled):active) > .lg-tint { filter: brightness(1.12); }
+
+  /* Its first 12 pt sit under the edge sampler, the tint solid there, so the two meet without a seam. */
+  .scroll-edge {
+    position: fixed;
+    inset-inline: 0;
+    top: 0;
+    /* Every stop sits a stuck strip's height lower, so a strip under the bar is covered as the bar is. */
+    --edge-base: calc(var(--safe-top) + var(--bar-h) + var(--edge-fade));
+    --edge-shift: var(--sticky-h, 0px);
+    height: calc(var(--edge-base) + var(--edge-shift));
+    pointer-events: none;
+    z-index: 25;
+    transition: height 200ms ease-out;
+  }
+  .scroll-edge > i {
+    position: absolute;
+    inset: 0;
+    display: block;
+    opacity: 0;
+    transition: opacity 180ms ease-out;
+  }
+  html[data-bar-shown] .scroll-edge > i { opacity: 1; }
+  .scroll-edge > i:nth-child(1) {
+    -webkit-backdrop-filter: blur(2px);  backdrop-filter: blur(2px);
+    -webkit-mask-image: linear-gradient(#000 calc(var(--edge-shift) + var(--edge-base) * 0.72), transparent);
+            mask-image: linear-gradient(#000 calc(var(--edge-shift) + var(--edge-base) * 0.72), transparent);
+  }
+  .scroll-edge > i:nth-child(2) {
+    -webkit-backdrop-filter: blur(8px);  backdrop-filter: blur(8px);
+    -webkit-mask-image: linear-gradient(#000 calc(var(--edge-shift) + var(--edge-base) * 0.5), transparent calc(var(--edge-shift) + var(--edge-base) * 0.82));
+            mask-image: linear-gradient(#000 calc(var(--edge-shift) + var(--edge-base) * 0.5), transparent calc(var(--edge-shift) + var(--edge-base) * 0.82));
+  }
+  .scroll-edge > i:nth-child(3) {
+    -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+    -webkit-mask-image: linear-gradient(#000 calc(var(--edge-shift) + var(--edge-base) * 0.3), transparent calc(var(--edge-shift) + var(--edge-base) * 0.62));
+            mask-image: linear-gradient(#000 calc(var(--edge-shift) + var(--edge-base) * 0.3), transparent calc(var(--edge-shift) + var(--edge-base) * 0.62));
+  }
+  .scroll-edge > i:nth-child(4) {
+    background: linear-gradient(
+      var(--background) var(--top-scrim),
+      color-mix(in srgb, var(--background) 80%, transparent) calc(var(--edge-shift) + var(--edge-base) * 0.38),
+      color-mix(in srgb, var(--background) 45%, transparent) calc(var(--edge-shift) + var(--edge-base) * 0.7),
+      transparent
+    );
+  }
+
+  /* In light the edge is solid page ground to the bar's foot: the dark edge's translucent tint reads as a smudge on
+     the near-white page. Dark takes this shape too while a glass strip is stuck under the bar, or its 45 % foot would
+     show the rows between the bar and the strip. */
+  :is(html:not(.dark), html:has(main [data-testid="sticky-bar"][data-stuck])) .scroll-edge {
+    --edge-base: calc(var(--safe-top) + var(--bar-h) + var(--edge-band));
+    --edge-solid: calc(var(--edge-shift) + var(--safe-top) + var(--bar-h));
+  }
+  :is(html:not(.dark), html:has(main [data-testid="sticky-bar"][data-stuck])) .scroll-edge > i:nth-child(1) {
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    -webkit-mask-image: linear-gradient(transparent var(--edge-solid), #000 var(--edge-solid), transparent);
+            mask-image: linear-gradient(transparent var(--edge-solid), #000 var(--edge-solid), transparent);
+  }
+  :is(html:not(.dark), html:has(main [data-testid="sticky-bar"][data-stuck])) .scroll-edge > i:nth-child(2),
+  :is(html:not(.dark), html:has(main [data-testid="sticky-bar"][data-stuck])) .scroll-edge > i:nth-child(3) { display: none; }
+  :is(html:not(.dark), html:has(main [data-testid="sticky-bar"][data-stuck])) .scroll-edge > i:nth-child(4) {
+    background: linear-gradient(var(--background) var(--edge-solid), transparent);
+  }
+
+  /* A sibling before the tab bar's capsule, under it in the nav's stacking context, never an ancestor of its glass. */
+  .bottom-edge {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    height: 120px;
+    pointer-events: none;
+    z-index: -1;
+  }
+  .bottom-edge > i {
+    position: absolute;
+    inset: 0;
+    display: block;
+  }
+  .bottom-edge > i:nth-child(1) {
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    -webkit-mask-image: linear-gradient(to top, #000 45%, transparent);
+            mask-image: linear-gradient(to top, #000 45%, transparent);
+  }
+  .bottom-edge > i:nth-child(2) {
+    background: linear-gradient(to top,
+      color-mix(in srgb, var(--background) 72%, transparent) 0%,
+      color-mix(in srgb, var(--background) 40%, transparent) 45%,
+      transparent 100%);
+  }
+
+  /* Safari maps ui-rounded to SF Pro Rounded. */
+  .num-rounded { font-family: ui-rounded, "SF Pro Rounded", var(--font-sans); }
+
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .lg > .lg-blur, .lg > .lg-edge { display: none; }
+    .lg > .lg-tint { background: var(--raised); box-shadow: inset 0 0 0 1px var(--border); }
+    .scroll-edge > i:nth-child(-n + 3), .bottom-edge > i:nth-child(1) { display: none; }
+    .scroll-edge > i:nth-child(4) { background: linear-gradient(var(--background) calc(100% - var(--edge-fade)), transparent); }
+  }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .lg > .lg-blur, .lg > .lg-edge { display: none; }
+    .lg > .lg-tint { background: var(--raised); box-shadow: inset 0 0 0 1px var(--border); }
+    .lg > .lg-tint::after { opacity: 0.5; }
+    .scroll-edge > i:nth-child(-n + 3), .bottom-edge > i:nth-child(1) { display: none; }
+    .scroll-edge > i:nth-child(4) { background: linear-gradient(var(--background) calc(100% - var(--edge-fade)), transparent); }
+  }
+  html[data-glass="solid"] .lg > .lg-blur,
+  html[data-glass="solid"] .lg > .lg-edge,
+  html[data-glass="solid"] .scroll-edge > i:nth-child(-n + 3),
+  html[data-glass="solid"] .bottom-edge > i:nth-child(1) { display: none; }
+  html[data-glass="solid"] .lg > .lg-tint { background: var(--raised); box-shadow: inset 0 0 0 1px var(--border); }
+  html[data-glass="solid"] .scroll-edge > i:nth-child(4) { background: linear-gradient(var(--background) calc(100% - var(--edge-fade)), transparent); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .lg, .lg > .lg-tint { transition: opacity 150ms ease-out !important; }
+    .lg:is(button, a):active, .lg[data-pressed], .lg:has(> .lg-press:active) { transform: none; }
+  }
+}
+
+/* An outline, so the gap is whatever is under it, where a shadow ring had to guess the ground's colour. */
+@utility state-today {
+  outline: var(--state-ring) solid var(--accent);
+  outline-offset: var(--state-ring);
+}
+
+/* A transparent ::after centred on the control, so the visual size and the touch size come apart. */
+@utility hit-44 {
+  position: relative;
+
+  &::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, var(--tap-min));
+    height: max(100%, var(--tap-min));
+    transform: translate(-50%, -50%);
+  }
+}
+
+@layer components {
+  /* Neutral surfaces despite the old glass class names: opaque, flat, no blur and no accent. */
   .glass-nav,
   .glass-sheet,
   .glass-chip {
-    border: 1px solid var(--glass-border);
-    background: var(--glass-bg);
-    -webkit-backdrop-filter: blur(var(--ro-blur)) saturate(var(--glass-sat));
-    backdrop-filter: blur(var(--ro-blur)) saturate(var(--glass-sat));
+    border: 1px solid var(--border);
+    background: var(--card);
   }
 
-  @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
-    .glass-card,
-    .glass-nav,
-    .glass-sheet,
-    .glass-chip {
-      background: var(--glass-fallback);
-    }
-  }
-
-  .glass-card {
+  .glass-card,
+  .glass-hero,
+  .glass-row {
+    border: 0;
+    background: var(--card);
+    box-shadow: var(--card-edge);
     border-radius: var(--radius-card);
-    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-shadow-float);
   }
 
   .glass-hero {
-    border-radius: var(--radius-card);
-    padding: 18px;
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    background: var(--hero-gradient);
-    /* The second layer is the accent bloom around the card. It is transparent in
-       light mode, where the hero is already a deep opaque gradient. */
-    box-shadow: 0 10px 26px -6px rgba(0, 0, 0, 0.35), 0 8px 40px -8px var(--hero-glow);
+    padding: 18px 20px;
   }
 
+  /* A sibling under the content, never an ancestor of glass. */
+  .aura {
+    position: absolute;
+    left: -60px;
+    right: -60px;
+    /* The status bar is opaque and exactly --background, so nothing but the page colour may meet it. */
+    top: var(--safe-top);
+    height: 380px;
+    pointer-events: none;
+    filter: blur(36px);
+    /* Clear under the edge sampler, then in over 24 pt with a smoothstep: anything harder reads as a line under the
+       status bar. */
+    -webkit-mask-image: linear-gradient(transparent 0, transparent var(--edge-sample-h), rgb(0 0 0 / 0.16) calc(var(--edge-sample-h) + 6px), rgb(0 0 0 / 0.5) calc(var(--edge-sample-h) + 12px), rgb(0 0 0 / 0.84) calc(var(--edge-sample-h) + 18px), #000 calc(var(--edge-sample-h) + 24px), #000 55%, transparent 100%);
+            mask-image: linear-gradient(transparent 0, transparent var(--edge-sample-h), rgb(0 0 0 / 0.16) calc(var(--edge-sample-h) + 6px), rgb(0 0 0 / 0.5) calc(var(--edge-sample-h) + 12px), rgb(0 0 0 / 0.84) calc(var(--edge-sample-h) + 18px), #000 calc(var(--edge-sample-h) + 24px), #000 55%, transparent 100%);
+    background:
+      radial-gradient(60% 46% at 16% 20%, color-mix(in srgb, var(--aura-1) 55%, white) 0%, transparent 70%),
+      radial-gradient(55% 42% at 88% 14%, color-mix(in srgb, var(--aura-2) 48%, white) 0%, transparent 70%),
+      radial-gradient(70% 42% at 55% 56%, color-mix(in srgb, var(--aura-3) 36%, white) 0%, transparent 75%);
+    transition: opacity 250ms ease-out;
+  }
+  .dark .aura {
+    opacity: 0.5;
+    background:
+      radial-gradient(60% 46% at 16% 20%, color-mix(in srgb, var(--aura-1) 40%, transparent) 0%, transparent 70%),
+      radial-gradient(55% 42% at 88% 14%, color-mix(in srgb, var(--aura-2) 32%, transparent) 0%, transparent 70%),
+      radial-gradient(70% 42% at 55% 56%, color-mix(in srgb, var(--aura-3) 24%, transparent) 0%, transparent 75%);
+  }
+  html[data-glow="off"] .aura { display: none; }
+
+  /* Never glass and never blurred: a blur per card would put a live backdrop-filter on every card in the list. */
+  html:not(.dark):not([data-glow="off"]) :is(.content-card, .glass-card, .glass-hero, .glass-row) {
+    --card: rgb(255 255 255 / 0.88);
+    --card-edge: inset 0 1px 0 rgb(255 255 255 / 0.9), 0 0 0 0.5px rgb(0 0 0 / 0.05), 0 8px 24px rgb(40 50 70 / 0.06);
+  }
+  html:not(.dark):not([data-glow="off"]) :is(.content-card, .glass-card, .glass-hero, .glass-row) .inset-tile {
+    background: rgb(118 118 128 / 0.07);
+  }
+
+  /* In light over the glow, the regular glass: the system grey turns muddy over colour. Never inside a card. */
+  .on-aura { background-color: var(--fill-3); }
+  html:not(.dark):not([data-glow="off"]) .on-aura {
+    background: linear-gradient(180deg, var(--glass-sheen) 0%, transparent 55%), var(--glass-fill);
+    box-shadow: var(--glass-drop);
+    -webkit-backdrop-filter: var(--glass-filter);
+            backdrop-filter: var(--glass-filter);
+  }
+
+  /* A group's controls share one blur, .on-aura-blur, a sibling laid under them, rather than one each. */
+  .on-aura-group { position: relative; }
+  .on-aura-group > .on-aura-blur {
+    position: absolute;
+    pointer-events: none;
+    display: none;
+  }
+  html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group > .on-aura-blur {
+    display: block;
+    -webkit-backdrop-filter: var(--glass-filter);
+            backdrop-filter: var(--glass-filter);
+  }
+  /* The chip row's blur spans the gaps too, so no saturate or brightness: they draw the row as a band across the glow. */
+  html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group > .on-aura-blur.on-aura-blur-row {
+    -webkit-backdrop-filter: blur(var(--blur-md));
+            backdrop-filter: blur(var(--blur-md));
+  }
+  html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group .on-aura {
+    position: relative;
+    background: linear-gradient(180deg, var(--glass-sheen) 0%, transparent 55%), var(--glass-fill);
+    box-shadow: var(--glass-drop);
+    -webkit-backdrop-filter: none;
+            backdrop-filter: none;
+  }
+  html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group .on-aura::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: var(--glass-rim);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+    pointer-events: none;
+  }
+
+  /* System overrides win: no glow and white cards whatever the setting. */
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .aura { display: none; }
+    html:not(.dark) .on-aura {
+      background-color: var(--fill-3);
+      -webkit-backdrop-filter: none;
+              backdrop-filter: none;
+    }
+    html:not(.dark) :is(.content-card, .glass-card, .glass-hero, .glass-row) { --card: #ffffff; }
+    html:not(.dark) :is(.content-card, .glass-card, .glass-hero, .glass-row) .inset-tile { background: var(--background); }
+    html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group > .on-aura-blur { display: none; }
+    html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group .on-aura { background: var(--fill-3); box-shadow: none; }
+    html:not([data-glow="off"]):not([data-glass="solid"]) .on-aura-group .on-aura::before { content: none; }
+  }
+  html[data-glass="solid"] .aura { display: none; }
+  html[data-glass="solid"]:not(.dark) .on-aura {
+    background-color: var(--fill-3);
+    -webkit-backdrop-filter: none;
+            backdrop-filter: none;
+  }
+  html[data-glass="solid"]:not(.dark) :is(.content-card, .glass-card, .glass-hero, .glass-row) { --card: #ffffff; }
+
+  /* A sibling of the map controls' glass in the map's root, never over it, where its tint greys them out. */
+  .map-top-edge {
+    position: absolute;
+    inset-inline: 0;
+    top: 0;
+    z-index: 20;
+    pointer-events: none;
+    height: 96px;
+  }
+  .map-top-edge > i {
+    position: absolute;
+    inset: 0;
+    display: block;
+  }
+  .map-top-edge > i:nth-child(1) {
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    -webkit-mask-image: linear-gradient(#000 55%, transparent);
+            mask-image: linear-gradient(#000 55%, transparent);
+    transition: opacity 150ms ease-out;
+  }
+  .map-top-edge > i:nth-child(2) {
+    background: linear-gradient(
+      var(--background) 12px,
+      color-mix(in srgb, var(--background) 55%, transparent) 40%,
+      transparent
+    );
+  }
+  [data-map-moving] .map-top-edge > i:nth-child(1) { opacity: 0; transition: none; }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .map-top-edge > i:nth-child(1) { display: none; }
+  }
+  html[data-glass="solid"] .map-top-edge > i:nth-child(1) { display: none; }
+
+  .btn-prominent {
+    background-image: linear-gradient(180deg, rgb(255 255 255 / 0.24), transparent 60%);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.35),
+      inset 0 -1px 0 rgb(0 0 0 / 0.08),
+      0 8px 20px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+
+  .inset-tile {
+    background: var(--background);
+  }
+
+  .inset-group > * + * {
+    position: relative;
+  }
+  .inset-group > * + *::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: var(--row-inset, 16px);
+    right: 0;
+    height: 0.5px;
+    background: var(--divider);
+    pointer-events: none;
+  }
+  .inset-group > [data-row-thumb] + *::before {
+    left: var(--row-thumb-inset, 72px);
+  }
+
+  /* The tab bar. */
   .glass-nav {
-    background: var(--glass-bg-nav);
-    -webkit-backdrop-filter: blur(28px) saturate(var(--glass-sat));
-    backdrop-filter: blur(28px) saturate(var(--glass-sat));
-    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-shadow-nav);
+    background: var(--tab-bar-bg);
+    border: 0;
+    border-top: 1px solid var(--tab-bar-hairline);
+  }
+
+  /* The desktop sidebar. */
+  .glass-chrome {
+    background: var(--card);
+    border: 1px solid var(--border);
   }
 
   .glass-sheet {
-    background: var(--glass-bg-sheet);
-    -webkit-backdrop-filter: blur(32px) saturate(var(--glass-sat));
-    backdrop-filter: blur(32px) saturate(var(--glass-sat));
-    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-shadow-float);
-  }
-
-  .glass-chip {
-    -webkit-backdrop-filter: blur(8px) saturate(1.5);
-    backdrop-filter: blur(8px) saturate(1.5);
+    background: var(--raised);
+    box-shadow: var(--shadow-modal);
   }
 
   .glass-map-chip {
-    background: var(--glass-bg-nav);
-    border: 1px solid var(--glass-border);
-    -webkit-backdrop-filter: blur(12px) saturate(var(--glass-sat));
-    backdrop-filter: blur(12px) saturate(var(--glass-sat));
+    background: var(--raised);
+    border: 1px solid var(--border);
     border-radius: 10px;
     color: var(--ro-text);
   }
 
-  @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
-    .glass-map-chip {
-      background: var(--glass-fallback);
-    }
-  }
-
-  /* The dense-grid glass: translucent like .glass-card but deliberately without
-     a backdrop-filter, so a grid of small tiles never blows the ~6-blurred-
-     surfaces-per-viewport budget (see GlassSurface). Use it for tile grids and
-     list rows; use .glass-card for the large cards. */
-  .glass-row {
-    background: var(--glass-row-bg);
-    border: 1px solid var(--glass-border);
-    border-radius: 14px;
+  .surface-raised {
+    background: var(--raised);
+    box-shadow: var(--shadow-raised);
   }
 
   .skeleton-shimmer {
@@ -565,90 +1024,50 @@
 
   .text-display {
     font-family: var(--font-display);
-    font-size: clamp(1.6rem, 1.32rem + 1.4vw, 2.125rem);
+    font-size: var(--text-large-title);
     font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 1.15;
+    letter-spacing: var(--text-large-title--letter-spacing);
+    line-height: var(--text-large-title--line-height);
   }
 
-  /* HIG touch target minimum (44x44pt) for nav controls */
+  /* HIG touch target minimum. */
   .btn-nav {
     min-width: 44px;
     min-height: 44px;
   }
 
-  /* Accessible metric progress bars (8px, previously 4px) */
   .metric-bar {
     height: 8px;
     border-radius: 4px;
   }
 
-  /* Eyebrow label style for widget headers */
-  .widget-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-  }
-
-  .aurora {
-    position: fixed;
-    inset: 0;
-    z-index: 0;
-    overflow: hidden;
-    pointer-events: none;
-    background: var(--canvas);
-  }
-  .aurora-blob {
-    position: absolute;
-    border-radius: 9999px;
-    filter: blur(var(--aurora-blur));
-  }
-  .aurora-blob-1 {
-    width: max(640px, 60vmax);
-    height: max(640px, 60vmax);
-    left: -14vmax;
-    top: -16vmax;
-    background: radial-gradient(circle, var(--aurora-1) 0%, transparent 62%);
-    opacity: var(--aurora-1-opacity);
-    animation: ro-aurora 16s ease-in-out infinite;
-  }
-  .aurora-blob-2 {
-    width: max(580px, 56vmax);
-    height: max(580px, 56vmax);
-    right: -14vmax;
-    top: 8vmax;
-    background: radial-gradient(circle, var(--aurora-2) 0%, transparent 62%);
-    opacity: var(--aurora-2-opacity);
-    animation: ro-aurora2 19s ease-in-out infinite;
-  }
 }
 
 html {
   scroll-behavior: smooth;
-  /* Blocks iOS Safari's rubber-band bounce at the document edge, which is
-     enough residual touch scroll to trigger the toolbar's show/hide
-     animation (and drag every `position: fixed` element along with it) even
-     while useScrollLock has the body pinned. */
+  /* Blocks iOS Safari's rubber-band bounce, which triggers the toolbar's show/hide animation even while
+     useScrollLock pins the body. */
   overscroll-behavior-y: none;
+  /* No double-tap zoom: pinch is cancelled in NoPinchZoom, so a double-tap zoom would have no way back out. */
+  touch-action: manipulation;
 }
 
 html,
 body {
   background-color: var(--background);
+  /* No native pull-to-refresh: Today's own pull is the only one. */
+  overscroll-behavior-y: none;
 }
 
 body {
   color: var(--foreground);
-  line-height: 1.625;
+  line-height: 1.5;
   font-variant-numeric: tabular-nums;
   overflow-x: hidden;
   -webkit-user-select: none;
   user-select: none;
 }
 
-/* Text selection stays available where it's actually useful: editable
-   fields and free-form notes, not the app chrome. */
 input,
 textarea,
 [contenteditable="true"] {
@@ -656,19 +1075,12 @@ textarea,
   user-select: text;
 }
 
-/* Desktop browser tabs get free text selection back. Mouse + hover rules out
-   touch/mobile browsers, and `display-mode: browser` rules out the installed
-   PWA, where selection still fights the app-like chrome. */
+/* Mouse + hover rules out touch browsers, and `display-mode: browser` rules out the installed PWA. */
 @media (hover: hover) and (pointer: fine) and (display-mode: browser) {
   body {
     -webkit-user-select: text;
     user-select: text;
   }
-}
-
-h1 {
-  letter-spacing: -0.025em;
-  line-height: 1.2;
 }
 
 * {
@@ -681,36 +1093,48 @@ h1 {
 ::-webkit-scrollbar-thumb:hover { display: none; }
 
 .maplibregl-ctrl-attrib.maplibregl-compact {
-  background: rgba(0 0 0 / 0.5) !important;
+  background: var(--map-attrib-bg) !important;
   border-radius: 6px !important;
 }
+.maplibregl-ctrl-attrib.maplibregl-compact {
+  min-height: 22px !important;
+  min-width: 22px !important;
+  border-radius: 11px !important;
+}
 .maplibregl-ctrl-attrib.maplibregl-compact .maplibregl-ctrl-attrib-button {
+  width: 22px !important;
+  height: 22px !important;
+  background-size: 16px !important;
   background-color: transparent !important;
   filter: invert(1) brightness(0.8);
 }
 .maplibregl-ctrl-attrib-inner,
 .maplibregl-ctrl-attrib-inner a {
-  color: rgba(255 255 255 / 0.75) !important;
-  font-size: 10px !important;
+  color: var(--map-attrib-fg) !important;
+  font-size: 11px !important;
 }
 
 @layer base {
+  /* In base, not unlayered: unlayered, it would beat every title's own tracking. */
+  h1 {
+    line-height: 1.2;
+  }
+
   button {
     -webkit-tap-highlight-color: transparent;
     cursor: pointer;
   }
 
-  /* Prevent iOS's long-press link-preview/share menu on in-app navigation -
-     it reads as a native browser affordance, not part of the PWA. Also
-     disable the native drag-lift preview Safari shows when a long-press
-     turns into a finger move over a link. */
+  /* No iOS long-press link preview nor Safari drag-lift preview: they read as browser affordances, not the PWA. */
   a {
     -webkit-touch-callout: none;
     -webkit-user-drag: none;
     user-drag: none;
   }
 
-  button:not(:disabled):active {
+  /* Glass is left out: it swells instead, and an opacity under 1 would make the button a backdrop root and flatten
+     its blur. */
+  button:not(:disabled):not(.lg):not(.lg-press):active {
     transform: scale(0.96);
     opacity: 0.85;
   }
@@ -721,14 +1145,6 @@ h1 {
     border-radius: 4px;
   }
 
-  @media (pointer: coarse) {
-    input,
-    textarea,
-    select {
-      font-size: max(16px, 1em);
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
@@ -736,4 +1152,37 @@ h1 {
       transition-duration: 0.01ms !important;
     }
   }
+}
+
+/* Unlayered, deliberately: iOS Safari zooms on focusing a field under 16px and never zooms back out, and Tailwind's
+   utilities layer beats anything in `base` whatever its specificity. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+}
+
+/* On a phone a sticky strip sticks only under the compact title bar: stuck alone at the top edge, iOS 26 takes it
+   for the page's bar and leaves its blur over the large title. */
+@media (max-width: 63.99rem) {
+  :root {
+    --sticky-alone: -100000px;
+  }
+}
+
+/* WebKit's sample point: one solid colour 4px in, >10px tall, full width. Found there, iOS 26 takes it for the
+   page's bar and draws no scroll-edge blur of its own over the large titles. A sheet's scrim starts at the safe
+   area's foot, so the strip dims the part above it itself while one is open. */
+.edge-sampler {
+  position: fixed;
+  inset-inline: 0;
+  top: 0;
+  height: calc(var(--safe-top) + var(--edge-sample-h));
+  background-color: var(--background);
+  z-index: 45;
+}
+html[data-sheet-open] .edge-sampler {
+  box-shadow: inset 0 var(--safe-top) 0 0 var(--scrim-sheet);
 }

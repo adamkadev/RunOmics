@@ -5,24 +5,70 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from data_directory import get_data_dir
 from processing.mapper import ActivityData
-
-_DEFAULT_DIR = Path(__file__).resolve().parents[2] / "public" / "data" / "activities"
-_PLANNED_DEFAULT_DIR = Path(__file__).resolve().parents[2] / "public" / "data" / "planned_workouts"
+from repository.atomic_write import write_text_atomic
+from repository.history_file import HistoryFileError, read_history
 
 
 def _year_of(date: str) -> str | None:
     return date[:4] if len(date) >= 4 else None
 
 
+def _zone_seconds(zones: Any) -> list[Any] | None:
+    return [zone.get("seconds") for zone in zones if isinstance(zone, dict)] if isinstance(zones, list) else None
+
+
 def _month_of(date: str) -> str | None:
     return date[:7] if len(date) >= 7 else None
 
 
+def _read_entries(path: Path, key: str, id_field: str) -> list[dict[str, Any]]:
+    """The entries of one month or year file, or HistoryFileError.
+
+    Both stores rewrite every dirty file, and index.json, from memory on
+    save(). A file skipped here would come back holding only this sync's
+    entries - or leave the index altogether if none landed in it - so an
+    unreadable file stops the store instead, as the history files do.
+    """
+    entries = read_history(path).get(key, [])
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict) and id_field in entry for entry in entries
+    ):
+        raise HistoryFileError(
+            f"{path}[{key!r}] is not a list of entries that each carry {id_field!r}. "
+            f"Refusing to continue: the next save would rewrite this file. Restore it "
+            f"from the data repository's git history, then re-run."
+        )
+    return entries
+
+
+def _is_leaf(value: Any) -> bool:
+    """A scalar, or a list of scalars such as a [lon, lat] pair."""
+    if isinstance(value, dict):
+        return False
+    if isinstance(value, list):
+        return all(not isinstance(item, (dict, list)) for item in value)
+    return True
+
+
+def dumps_readable(value: Any, indent: str = "") -> str:
+    """Objects one key a line so a diff names the field; number arrays and pairs on one line, 2.5x smaller than indent=2."""
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        inner = indent + "  "
+        fields = [f"{inner}{json.dumps(key, ensure_ascii=False)}: {dumps_readable(item, inner)}" for key, item in value.items()]
+        return "{\n" + ",\n".join(fields) + "\n" + indent + "}"
+    if isinstance(value, list) and value and not all(_is_leaf(item) for item in value):
+        inner = indent + "  "
+        return "[\n" + ",\n".join(inner + dumps_readable(item, inner) for item in value) + "\n" + indent + "]"
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    # No trailing newline: the bytes these files have always had.
+    write_text_atomic(path, dumps_readable(data))
 
 
 class JsonActivityStore:
@@ -34,8 +80,8 @@ class JsonActivityStore:
     year file reaches ~7 MB by December and every sync rewrote it wholesale. A
     month is ~600 KB and closed months never move again."""
 
-    def __init__(self, dir_path: Path = _DEFAULT_DIR) -> None:
-        self._dir = dir_path
+    def __init__(self, dir_path: Path | None = None) -> None:
+        self._dir = dir_path or get_data_dir() / "activities"
         self._by_id: dict[str, dict[str, Any]] = {}
         self._dirty_months: set[str] = set()
         self._load()
@@ -47,6 +93,9 @@ class JsonActivityStore:
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         return [aid for aid, a in self._by_id.items() if a.get("date", "") >= cutoff]
 
+    def get_gear_pending_ids(self) -> list[str]:
+        return [aid for aid, a in self._by_id.items() if a.get("gearPending")]
+
     def all_activities(self) -> list[dict[str, Any]]:
         return list(self._by_id.values())
 
@@ -57,20 +106,59 @@ class JsonActivityStore:
 
     def update_gear(self, activity_id: str, gear_id: str | None) -> bool:
         activity = self._by_id.get(activity_id)
-        if activity is None or activity.get("gearId") == gear_id:
+        if activity is None:
             return False
+        answered = activity.pop("gearPending", None) is not None
+        changed = activity.get("gearId") != gear_id
         activity["gearId"] = gear_id
+        if changed or answered:
+            self.touch(activity_id)
+        return changed
+
+    def set_start_time(self, activity_id: str, start: str) -> bool:
+        activity = self._by_id.get(activity_id)
+        if activity is None or activity.get("startTimeLocal") == start:
+            return False
+        activity["startTimeLocal"] = start
         self.touch(activity_id)
         return True
 
-    def upsert(self, activity: ActivityData, *, replace: bool = False) -> bool:
+    def upsert(
+        self,
+        activity: ActivityData,
+        *,
+        replace: bool = False,
+        keep_gear: bool = False,
+        gear_pending: bool = False,
+        keep_zone_bounds: bool = False,
+    ) -> bool:
+        """Store one activity; True when it is new.
+
+        keep_gear: nothing asked for the gear (only Connect's private API
+        knows it), so the shoe on file stays.
+        keep_zone_bounds: the zones' bpm are the athlete's current ones (the
+        Personal API's), not those the activity was recorded with; where the
+        time in each zone is the same, the stored zones stay.
+        """
         new_dict = activity.to_dict()
         existing = self._by_id.get(activity.id)
-        if existing is not None and not replace:
-            new_dict["rpe"] = existing.get("rpe", new_dict["rpe"])
+        if existing is not None:
+            # Typed into the data repository, and never sent back by Garmin:
+            # no re-fetch may drop them, a forced one (replace) included.
             new_dict["comment"] = existing.get("comment", "")
-            if new_dict.get("weather") is None:
+            if existing.get("rpe") is not None:
+                new_dict["rpe"] = existing["rpe"]
+            if keep_gear:
+                new_dict["gearId"] = existing.get("gearId")
+                gear_pending = bool(existing.get("gearPending"))
+            if keep_zone_bounds and _zone_seconds(existing.get("hrZones")) == _zone_seconds(new_dict.get("hrZones")):
+                new_dict["hrZones"] = existing.get("hrZones")
+            # Weather can be re-derived (backfill_weather.py), so replace
+            # starts it over with everything else Garmin sends.
+            if not replace and new_dict.get("weather") is None:
                 new_dict["weather"] = existing.get("weather")
+        if keep_gear and gear_pending:
+            new_dict["gearPending"] = True
 
         self._by_id[activity.id] = new_dict
         self.touch(activity.id)
@@ -103,11 +191,7 @@ class JsonActivityStore:
         for path in sorted(self._dir.glob("*.json")):
             if path.name == "index.json":
                 continue
-            try:
-                data = json.loads(path.read_text("utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            for activity in data.get("activities", []):
+            for activity in _read_entries(path, "activities", "id"):
                 self._by_id[activity["id"]] = activity
 
 
@@ -124,8 +208,8 @@ class PlannedWorkoutStore:
     here survives forever - a sync only re-touches the year(s) whose entries
     actually changed."""
 
-    def __init__(self, dir_path: Path = _PLANNED_DEFAULT_DIR) -> None:
-        self._dir = dir_path
+    def __init__(self, dir_path: Path | None = None) -> None:
+        self._dir = dir_path or get_data_dir() / "planned_workouts"
         self._by_date: dict[str, dict[str, Any]] = {}
         self._dirty_years: set[str] = set()
         self._load()
@@ -177,9 +261,5 @@ class PlannedWorkoutStore:
         for path in sorted(self._dir.glob("*.json")):
             if path.name == "index.json":
                 continue
-            try:
-                data = json.loads(path.read_text("utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            for entry in data.get("planned", []):
+            for entry in _read_entries(path, "planned", "date"):
                 self._by_date[entry["date"]] = entry

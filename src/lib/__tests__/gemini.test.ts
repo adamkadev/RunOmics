@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { generateInsight } from '@/lib/gemini'
+import { generateInsight, generateStructuredJson, takesTemperature } from '@/lib/gemini'
+
+// generateStructuredJson retries a transient failure; tests skip the real waiting.
+const nap = () => Promise.resolve()
 
 const REQUEST = {
   model: 'test-model',
@@ -123,6 +126,15 @@ describe('generateInsight', () => {
     expect(result.ok).toBe(false)
     expect(result.ok === false && result.reason).toContain('offline')
   })
+
+  it('sends one request per call, however transient the failure: the model pool is the retry', async () => {
+    // The insight pass reserves a model's daily budget one request at a time; a retry here would overspend it.
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => 'high demand' })
+    vi.stubGlobal('fetch', fetchSpy)
+
+    expect(await generateInsight(REQUEST)).toEqual({ ok: false, reason: 'http 503: high demand' })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('generateInsight (French locale)', () => {
@@ -167,5 +179,86 @@ describe('generateInsight (French locale)', () => {
         body: "L'intensité a dépassé la cible et impose une récupération prolongée pour la suite.",
       })
     ).toBe('unexpectedly ok')
+  })
+})
+
+describe('generateStructuredJson transient failures', () => {
+  const request = {
+    apiKey: 'k', model: 'gemini-3.8-flash', systemInstruction: 's', prompt: 'p',
+    responseSchema: { type: 'OBJECT' as const },
+  }
+  const ok = () => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"a":1}' }] } }] }) })
+  const fail = (status: number) => ({ ok: false, status, text: async () => 'busy' })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('retries a 503 and returns the answer the next attempt gives', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(fail(503)).mockResolvedValueOnce(ok())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateStructuredJson(request, nap)
+
+    expect(result).toEqual({ ok: true, value: { a: 1 } })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives up after three attempts rather than retrying forever', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(fail(503))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateStructuredJson(request, nap)
+
+    expect(result.ok).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry a rejection the next attempt would repeat', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(fail(400))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await generateStructuredJson(request, nap)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  // Google's 3.8 Flash migration notes: temperature, top_p and top_k are deprecated there.
+  it('sends 3.8 Flash no temperature, and the models before it theirs', async () => {
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body).generationConfig)
+      return ok()
+    }))
+
+    await generateStructuredJson({ ...request, temperature: 0.2 }, nap)
+    await generateStructuredJson({ ...request, model: 'gemini-3.6-flash', temperature: 0.2 }, nap)
+    await generateStructuredJson({ ...request, model: 'gemini-3.5-flash-lite' }, nap)
+
+    expect(bodies[0]).not.toHaveProperty('temperature')
+    expect(bodies[0]).toMatchObject({ thinkingConfig: { thinkingLevel: 'low' } })
+    expect(bodies[1]).toMatchObject({ temperature: 0.2 })
+    expect(bodies[2]).toMatchObject({ temperature: 0.4 })
+    expect([takesTemperature('gemini-3.9-flash'), takesTemperature('gemini-4.0-flash'), takesTemperature('gemini-3.10-flash')]).toEqual([false, false, false])
+  })
+
+  // A name with no minor version reads as 3.0: thinking by level, and a temperature.
+  it('sends 3 Flash preview a thinking level and its temperature', async () => {
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body).generationConfig)
+      return ok()
+    }))
+
+    await generateStructuredJson({ ...request, model: 'gemini-3-flash-preview', temperature: 0.2 }, nap)
+
+    expect(bodies[0]).toMatchObject({ thinkingConfig: { thinkingLevel: 'low' }, temperature: 0.2 })
+  })
+
+  it('retries a timeout, which is the same kind of luck as a 503', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))
+      .mockResolvedValueOnce(ok())
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await generateStructuredJson(request, nap)).toEqual({ ok: true, value: { a: 1 } })
   })
 })

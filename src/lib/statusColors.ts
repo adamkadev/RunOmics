@@ -1,38 +1,44 @@
-// Semantic status colors: fixed, independent of the accent/brand picker.
-// Use these everywhere a status has universal meaning (success, in-progress, pending, warning, danger).
-// Accent-colored elements (nav, CTAs, progress bars) stay in accent - only STATUS indicators go here.
+// No tinted fills: a status is its text or dot colour on a neutral chip.
+const CHIP = 'bg-[var(--segmented-track)]'
+
 export const STATUS = {
   success: {
-    text:  'text-emerald-600 dark:text-emerald-400',
-    bg:    'bg-emerald-50 dark:bg-emerald-900/30',
-    dot:   'bg-emerald-500',
-    badge: 'bg-emerald-50 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300',
+    text:  'text-delta-good',
+    bg:    CHIP,
+    dot:   'bg-delta-good',
+    badge: `${CHIP} text-delta-good`,
   },
   progress: {
-    text:  'text-blue-600 dark:text-blue-400',
-    bg:    'bg-blue-50 dark:bg-blue-900/30',
-    dot:   'bg-blue-500',
-    badge: 'bg-blue-50 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
+    text:  'text-[var(--metric-fitness)]',
+    bg:    CHIP,
+    dot:   'bg-[var(--metric-fitness)]',
+    badge: `${CHIP} text-[var(--metric-fitness)]`,
   },
   pending: {
-    text:  'text-zinc-500 dark:text-zinc-400',
-    bg:    'bg-zinc-100 dark:bg-zinc-800',
-    dot:   'bg-zinc-400',
-    badge: 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300',
+    text:  'text-muted-foreground',
+    bg:    CHIP,
+    dot:   'bg-subtle',
+    badge: `${CHIP} text-muted-foreground`,
   },
   warning: {
-    text:  'text-amber-600 dark:text-amber-400',
-    bg:    'bg-amber-50 dark:bg-amber-900/30',
-    dot:   'bg-amber-500',
-    badge: 'bg-amber-50 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
+    text:  'text-[var(--tone-caution)]',
+    bg:    CHIP,
+    dot:   'bg-[var(--tone-caution)]',
+    badge: `${CHIP} text-[var(--tone-caution)]`,
   },
   danger: {
-    text:  'text-red-700 dark:text-red-400',
-    bg:    'bg-red-50 dark:bg-red-900/30',
-    dot:   'bg-red-500',
-    badge: 'bg-red-50 text-red-800 dark:bg-red-900/30 dark:text-red-300',
+    text:  'text-destructive',
+    bg:    CHIP,
+    dot:   'bg-destructive',
+    badge: `${CHIP} text-destructive`,
   },
-  gold:   { text: 'text-amber-500 dark:text-amber-400', dot: 'bg-amber-400 dark:bg-amber-400' },
-  silver: { text: 'text-slate-400 dark:text-slate-300', dot: 'bg-slate-300 dark:bg-slate-300' },
-  bronze: { text: 'text-amber-700 dark:text-amber-600', dot: 'bg-amber-700 dark:bg-amber-600' },
+  gold:   { text: 'text-[#f5b13d]', dot: 'bg-[#f5b13d]' },
+  silver: { text: 'text-[#c3ccd6]', dot: 'bg-[#c3ccd6]' },
+  bronze: { text: 'text-[#b06a3b]', dot: 'bg-[#b06a3b]' },
 } as const
+
+export const PROJECTION_TONE: Record<'ahead' | 'on_track' | 'behind', string> = {
+  ahead:    STATUS.success.text,
+  on_track: STATUS.progress.text,
+  behind:   STATUS.warning.text,
+}

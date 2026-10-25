@@ -1,9 +1,8 @@
+import 'server-only'
 import { timingSafeEqual } from 'crypto'
 import { NextResponse, type NextRequest } from 'next/server'
 
-export function isAuthorizedInternalRequest(req: NextRequest): boolean {
-  const secret = process.env.INTERNAL_NOTIFY_SECRET
-  const provided = req.headers.get('x-internal-secret')
+function matchesSecret(provided: string | null | undefined, secret: string | undefined): boolean {
   if (!secret || !provided) return false
 
   const secretBuf = Buffer.from(secret)
@@ -13,10 +12,17 @@ export function isAuthorizedInternalRequest(req: NextRequest): boolean {
   return timingSafeEqual(secretBuf, providedBuf)
 }
 
-// Fixed-window rate limit, keyed by client IP. In-memory, so on serverless
-// each warm instance counts separately - good enough to blunt secret
-// brute-forcing and push-notification floods, which is all these endpoints
-// need (they are hit a few times a day by GitHub Actions crons).
+export type InternalAuthorizer = (req: NextRequest) => boolean
+
+export function isAuthorizedInternalRequest(req: NextRequest): boolean {
+  return matchesSecret(req.headers.get('x-internal-secret'), process.env.INTERNAL_NOTIFY_SECRET)
+}
+
+/** Vercel Cron sends CRON_SECRET as a bearer token and cannot send any other header. */
+export function isAuthorizedCronRequest(req: NextRequest): boolean {
+  return matchesSecret(req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1], process.env.CRON_SECRET)
+}
+
 const RATE_LIMIT_MAX = 20
 const RATE_LIMIT_WINDOW_MS = 60_000
 
@@ -25,7 +31,6 @@ const hits = new Map<string, { count: number; windowStart: number }>()
 function isRateLimited(ip: string, now = Date.now()): boolean {
   const entry = hits.get(ip)
   if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
-    // Also prune stale entries opportunistically so the map can't grow forever.
     if (hits.size > 1000) {
       for (const [key, value] of hits) {
         if (now - value.windowStart >= RATE_LIMIT_WINDOW_MS) hits.delete(key)
@@ -38,18 +43,22 @@ function isRateLimited(ip: string, now = Date.now()): boolean {
   return entry.count > RATE_LIMIT_MAX
 }
 
-/**
- * Single guard for /api/internal/* routes: rate limit first (so failed auth
- * attempts are throttled too), then the shared-secret check. Returns the
- * error response to send, or null when the request may proceed.
- */
-export function guardInternalRequest(req: NextRequest): NextResponse | null {
+export type RejectionReason = 'unauthorized' | 'rate-limited' | 'forbidden' | 'not-configured'
+
+/** Which route and why, never who or with what: no header value (secret, token, forwarded IP) reaches the log. */
+export function logRejectedRequest(req: NextRequest, reason: RejectionReason): void {
+  console.warn(JSON.stringify({ level: 'warn', event: 'request-rejected', route: req.nextUrl.pathname, reason }))
+}
+
+export function guardInternalRequest(req: NextRequest, authorize: InternalAuthorizer = isAuthorizedInternalRequest): NextResponse | null {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
 
   if (isRateLimited(ip)) {
+    logRejectedRequest(req, 'rate-limited')
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 })
   }
-  if (!isAuthorizedInternalRequest(req)) {
+  if (!authorize(req)) {
+    logRejectedRequest(req, 'unauthorized')
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   return null

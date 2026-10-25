@@ -1,87 +1,45 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { Check } from 'lucide-react'
+import { useTheme } from 'next-themes'
 import { t } from '@/i18n'
-import { ACCENT_IDS, ACCENT_SWATCHES, persistAccent, type AccentId } from '@/lib/accent'
+import { CURATED_ACCENTS, persistAccent } from '@/lib/accent'
 import { useAccent } from '@/lib/useAccent'
+import { useMounted } from '@/lib/useMounted'
 
+/** The idle hairline gives Mono's white swatch an edge on a light card. */
+const RING = {
+  selected: '0 0 0 2px var(--card), 0 0 0 4px var(--foreground)',
+  idle: 'inset 0 0 0 1px var(--line-2)',
+}
+
+/**
+ * No custom hue: it could land on the zone and status colours. On a phone the
+ * swatches sit at least 44 pt apart so their hit-44 targets never overlap.
+ */
 export function AccentPicker() {
   const accent = useAccent()
-  const [mounted, setMounted] = useState(false)
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMounted(true)
-  }, [])
-
-  function selectAccent(id: AccentId) {
-    persistAccent(id)
-  }
+  const mounted = useMounted()
+  const { resolvedTheme } = useTheme()
+  const mode = mounted && resolvedTheme === 'light' ? 'light' : 'dark'
 
   return (
-    <div>
-      <h2 className="text-sm font-bold text-foreground">{t.settings.accent.title}</h2>
-      <p className="mt-0.5 text-xs text-muted-foreground">{t.settings.accent.subtitle}</p>
-
-      <div
-        className="mt-4 flex items-center gap-3 rounded-xl border p-3.5"
-        style={{
-          background: 'linear-gradient(135deg, var(--accent-subtle), transparent)',
-          borderColor: 'color-mix(in srgb, var(--accent) 20%, transparent)',
-        }}
-      >
-        <div
-          className="h-[38px] w-[38px] shrink-0 rounded-full"
-          style={{
-            background: 'conic-gradient(var(--accent) 0deg 250deg, color-mix(in srgb, var(--foreground) 8%, transparent) 250deg 360deg)',
-          }}
-          aria-hidden="true"
-        />
-        <div className="min-w-0 flex-1">
-          <div className="mb-1.5 h-[7px] w-3/5 rounded-full bg-accent" />
-          <div className="h-1.5 w-[85%] rounded-full bg-foreground/10" />
-        </div>
-        <span className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-micro font-semibold text-accent-foreground">
-          {t.settings.accent.preview}
-        </span>
-      </div>
-
-      <div className="mt-4 flex flex-wrap justify-center gap-3">
-        {ACCENT_IDS.map((id) => {
-          const { label } = t.settings.accent.options[id]
-          const color = ACCENT_SWATCHES[id]
-          const active = mounted && accent === id
-          return (
-            <button
-              key={id}
-              type="button"
-              onClick={() => selectAccent(id)}
-              aria-label={label}
-              aria-pressed={active}
-              onKeyDown={(e) => {
-                const idx = ACCENT_IDS.indexOf(id)
-                if (e.key === 'ArrowRight') {
-                  const next = ACCENT_IDS[(idx + 1) % ACCENT_IDS.length]
-                  if (next) selectAccent(next)
-                }
-                if (e.key === 'ArrowLeft') {
-                  const prev = ACCENT_IDS[(idx - 1 + ACCENT_IDS.length) % ACCENT_IDS.length]
-                  if (prev) selectAccent(prev)
-                }
-              }}
-              style={{
-                backgroundColor: color,
-                borderColor: active ? color : 'transparent',
-                boxShadow: active ? `0 0 0 3px ${color}59` : 'none',
-              }}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-2 transition-transform active:scale-90"
-            >
-              {active && <Check size={16} className="text-white drop-shadow-[0_1px_1.5px_var(--scrim-strong)]" />}
-            </button>
-          )
-        })}
-      </div>
+    <div className="flex flex-nowrap items-center gap-4 sm:gap-2.5" role="group" aria-label={t.settings.accent.title}>
+      {CURATED_ACCENTS.map((option) => {
+        const active = mounted && accent === option.id
+        const label = t.settings.accent.options[option.id].label
+        return (
+          <button
+            key={option.id}
+            type="button"
+            onClick={() => persistAccent(option.id)}
+            aria-label={label}
+            title={label}
+            aria-pressed={active}
+            style={{ backgroundColor: option[mode].acc, boxShadow: active ? RING.selected : RING.idle }}
+            className="hit-44 size-[30px] shrink-0 rounded-full transition-transform active:scale-90"
+          />
+        )
+      })}
     </div>
   )
 }

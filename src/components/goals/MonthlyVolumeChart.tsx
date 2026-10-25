@@ -1,107 +1,131 @@
 'use client'
 
-import { useState } from 'react'
-import { ChevronDown, ArrowRight, ArrowDown, Check, Minus } from 'lucide-react'
 import type { MonthGoal } from '@/application/usecases/GetGoalsData'
-import { GlassSurface } from '@/components/ui/GlassSurface'
-import { AnimatedValue } from '@/components/ui/AnimatedValue'
-import { monthLabel } from '@/lib/formatters'
-import { STATUS } from '@/lib/statusColors'
-import { GOAL_PACE_COLORS } from '@/lib/colors'
+import { cardClass } from '@/components/ui/Card'
+import { Legend, LegendItem } from '@/components/ui/Legend'
+import { formatKm, monthName } from '@/lib/formatters'
 import { cn } from '@/lib/utils'
 import { t } from '@/i18n'
+import { monthInitials } from './monthInitials'
 
-const STATUS_ICON: Record<MonthGoal['status'], { Icon: typeof Check; className: string }> = {
-  ahead:    { Icon: Check,       className: STATUS.success.text },
-  on_track: { Icon: ArrowRight,  className: STATUS.progress.text },
-  behind:   { Icon: ArrowDown,   className: STATUS.warning.text },
-  pending:  { Icon: Minus,       className: 'text-subtle/40' },
+/** The Analytics weekly bars' rule. */
+const MONTH_BAR: Record<'hit' | 'short', string> = {
+  hit: 'var(--accent)',
+  short: 'color-mix(in srgb, var(--accent) 40%, transparent)',
 }
 
-const MONTH_CELL_TINT: Record<MonthGoal['status'], { bg: string; border: string; bar: string; dashed?: boolean }> = {
-  ahead:    GOAL_PACE_COLORS.ahead,
-  on_track: GOAL_PACE_COLORS.onTrack,
-  behind:   GOAL_PACE_COLORS.behind,
-  pending:  { ...GOAL_PACE_COLORS.pending, dashed: true },
+/** Neutral ink, so the rule reads over both the card ground and a bar. */
+const TARGET_RULE_COLOR = 'var(--muted-foreground)'
+
+const pct = (km: number, max: number) => `${Math.min((km / max) * 100, 100)}%`
+
+/** One scale for every bar: normalised to its own target, a month that beat it would look like one that met it. */
+export function volumePlotMaxKm(months: MonthGoal[]): number {
+  const peak = months.reduce((max, mg) => Math.max(max, mg.actualKm, mg.targetKm), 0)
+  return peak > 0 ? peak * 1.08 : 1
 }
 
-// Clamped to a visible minimum so a near-zero month still renders a sliver.
-function barHeightPercent(mg: MonthGoal): number {
-  const pct = mg.targetKm > 0 ? Math.min((mg.actualKm / mg.targetKm) * 100, 100) : 0
-  return Math.max(pct, 6)
+export function inProgressMonth(months: MonthGoal[], year: number, now = new Date()): MonthGoal | null {
+  if (year !== now.getFullYear()) return null
+  return months.find((mg) => mg.month === now.getMonth() + 1) ?? null
 }
 
-export function MonthlyVolumeChart({ monthlyGoals }: { monthlyGoals: MonthGoal[] }) {
-  const [expanded, setExpanded] = useState(false)
-  const elapsedMonths = monthlyGoals.filter((mg) => mg.status !== 'pending')
-  if (elapsedMonths.length === 0) return null
+export function MonthlyVolumeChart({ monthlyGoals, year, today }: { monthlyGoals: MonthGoal[]; year: number; today: string }) {
+  const elapsed = monthlyGoals.filter((mg) => mg.status !== 'pending')
+  if (elapsed.length === 0) return null
+
+  const m = t.goals.monthlyVolume
+  const scaleMax = volumePlotMaxKm(elapsed)
+  const current = inProgressMonth(elapsed, year, new Date(`${today}T00:00:00`))
+  const targetKm = elapsed[0]!.targetKm
+  // One line only while the months agree; otherwise each bar is ticked.
+  const oneTarget = elapsed.every((mg) => mg.targetKm === targetKm)
+  const initials = monthInitials()
+  const byMonth = new Map(monthlyGoals.map((mg) => [mg.month, mg]))
 
   return (
-    <section className="space-y-3">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex min-h-6 w-full items-center justify-between gap-2"
-      >
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-          {t.goals.monthlyVolume.title}
-        </h2>
-        <span className="flex items-center gap-1 text-xs font-medium text-accent-text">
-          {expanded ? t.goals.monthlyVolume.collapse : t.goals.monthlyVolume.expand}
-          <ChevronDown size={14} className={cn('transition-transform', expanded && 'rotate-180')} />
-        </span>
-      </button>
+    <section className={cardClass({ className: 'flex flex-col gap-2.5' })} data-testid="monthly-volume">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="text-headline text-foreground">{m.title}</h2>
+        {targetKm > 0 && (
+          <span className="text-xs text-muted-foreground">{oneTarget ? m.target(formatKm(targetKm)) : m.targetFromPlan}</span>
+        )}
+      </div>
 
-      {expanded ? (
-        <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-          {monthlyGoals.map((mg) => {
-            const progress = mg.targetKm > 0 ? Math.min((mg.actualKm / mg.targetKm) * 100, 100) : 0
-            const { Icon: StatusIcon, className: statusClassName } = STATUS_ICON[mg.status]
-            const tint = MONTH_CELL_TINT[mg.status]
+      <div className="relative grid h-20 grid-cols-12 gap-1">
+        {oneTarget && targetKm > 0 && (
+          <span
+            aria-hidden
+            data-testid="target-rule"
+            className="pointer-events-none absolute inset-x-0 z-10 border-t border-dashed"
+            style={{ bottom: pct(targetKm, scaleMax), borderColor: TARGET_RULE_COLOR }}
+          />
+        )}
+        {initials.map((_, i) => {
+          const mg = byMonth.get(i + 1)
+          if (!mg || mg.status === 'pending') return <div key={i} />
+          const title = `${monthName(mg.month)}: ${m.km(formatKm(mg.actualKm), formatKm(mg.targetKm))} ${t.units.km}`
+          if (current?.month === mg.month) {
+            // A dashed outline of the target: the month is short because it is unfinished, not because it failed.
+            const outline = Math.max(mg.targetKm, mg.actualKm)
             return (
-              <GlassSurface
-                key={mg.month}
-                variant="card"
-                className={cn('rounded-card-sm p-5', tint.dashed && 'border-dashed')}
-                style={tint.bg ? { background: tint.bg, borderColor: tint.border } : undefined}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-xs font-semibold text-subtle">{monthLabel(mg.month)}</span>
-                  <StatusIcon
-                    size={12}
-                    strokeWidth={3}
-                    className={statusClassName}
-                    aria-label={t.goals.monthlyVolume.status[mg.status]}
-                  />
-                </div>
-                <p className="mt-1.5 text-xs font-medium text-foreground">
-                  <AnimatedValue value={Math.round(mg.actualKm)} /> / {Math.round(mg.targetKm)}
-                </p>
-                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-foreground/[0.08]">
+              <div key={i} className="relative">
+                <div
+                  className="absolute inset-x-0 bottom-0 box-border rounded-[4px] border-[1.5px] border-dashed border-accent"
+                  style={{ height: pct(outline, scaleMax) }}
+                  data-testid="running-month"
+                  title={title}
+                >
                   <div
-                    className="h-full rounded-full transition-all"
-                    style={{ width: `${progress}%`, background: tint.bar }}
+                    className="absolute inset-x-0 bottom-0 rounded-[3px] bg-accent"
+                    style={{ height: `${outline > 0 ? (mg.actualKm / outline) * 100 : 0}%` }}
                   />
                 </div>
-              </GlassSurface>
+              </div>
             )
-          })}
-        </div>
-      ) : (
-        <GlassSurface variant="card" className="flex h-24 items-end gap-2 rounded-card-sm p-4">
-          {elapsedMonths.map((mg) => (
-            <div
-              key={mg.month}
-              className="w-3 rounded-sm transition-all"
-              title={`${monthLabel(mg.month)}: ${mg.actualKm} / ${mg.targetKm} km`}
-              style={{
-                height: `${barHeightPercent(mg)}%`,
-                background: mg.status === 'behind' ? 'var(--color-missed)' : 'var(--accent)',
-              }}
-            />
-          ))}
-        </GlassSurface>
-      )}
+          }
+          const hit = mg.actualKm >= mg.targetKm
+          return (
+            <div key={i} className="relative">
+              {!oneTarget && mg.targetKm > 0 && (
+                <span
+                  aria-hidden
+                  data-testid="month-target-tick"
+                  className="pointer-events-none absolute inset-x-0 z-10 border-t border-dashed"
+                  style={{ bottom: pct(mg.targetKm, scaleMax), borderColor: TARGET_RULE_COLOR }}
+                />
+              )}
+              <div
+                className="absolute inset-x-0 bottom-0 rounded-[4px]"
+                title={title}
+                data-status={hit ? 'hit' : 'short'}
+                style={{ height: pct(mg.actualKm, scaleMax), minHeight: mg.actualKm > 0 ? 2 : 0, background: MONTH_BAR[hit ? 'hit' : 'short'] }}
+              />
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="grid grid-cols-12 gap-1" aria-hidden>
+        {initials.map((initial, i) => (
+          <span
+            key={i}
+            className={cn('text-center text-[11px]', current?.month === i + 1 ? 'text-accent-text' : 'text-muted-foreground')}
+          >
+            {initial}
+          </span>
+        ))}
+      </div>
+
+      <Legend>
+        <LegendItem swatch="square" color={MONTH_BAR.hit}>{m.hit}</LegendItem>
+        <LegendItem swatch="square" color={MONTH_BAR.short}>{m.short}</LegendItem>
+        {current && current.status !== 'pending' && (
+          <LegendItem swatch="dashRing" color="var(--accent)">
+            <span data-testid="running-legend">{m.running(monthName(current.month), formatKm(current.actualKm), m.pace[current.status])}</span>
+          </LegendItem>
+        )}
+      </Legend>
     </section>
   )
 }

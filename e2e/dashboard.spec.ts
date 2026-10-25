@@ -1,14 +1,18 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
-test('dashboard renders the weekly snapshot and recent activities', async ({ page }) => {
+test('dashboard renders the readiness card and the day', async ({ page }) => {
   await page.goto('/')
 
-  // Greeting + weekly stats grid load without a client-side data fetch (SSG).
-  await expect(page.getByRole('heading', { name: /good (morning|afternoon|evening)/i })).toBeVisible()
+  const readiness = page.getByTestId('readiness-card')
+  await expect(readiness).toBeVisible()
+  for (const id of ['tile-form', 'tile-fitness', 'tile-fatigue']) await expect(page.getByTestId(id)).toBeVisible()
+  await expect(page.getByTestId('readiness-card-link')).toHaveAttribute('href', '/analytics')
 
-  // data/activities/*.json always has activities (real or demo), so
-  // there is always at least one recent activity card linking into
-  // /activities/{id}.
-  const firstActivityLink = page.locator('a[href^="/activities/"]').first()
-  await expect(firstActivityLink).toBeVisible()
+  await expect(page.getByTestId('today-board')).toBeVisible()
+  const session = page.getByTestId('session-card')
+  if (await session.count()) await expect(session).toHaveAttribute('href', /^\/plan\?date=\d{4}-\d{2}-\d{2}$/)
+  await expect(page.getByTestId('last-run')).toHaveCount(0)
+
+  await expect(page.getByTestId('this-week-link')).toHaveAttribute('href', '/plan?view=week')
+  await expect(page.getByTestId('week-bar')).toHaveCount(7)
 })

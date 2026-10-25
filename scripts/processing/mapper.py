@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from processing.activity_type import infer_type
+from processing.activity_type import infer_type_with_source
 from processing.fit_parser import ActivitySplit, ParsedFit, SplitLap  # noqa: F401
-from processing.privacy import crop_privacy_zone
 
 _MAX_CHART_POINTS = 150
 
@@ -65,6 +64,12 @@ class ActivityData:
     splits: list[ActivitySplit] | None
     gear_id: str | None
     weather: dict[str, Any] | None = None
+    type_source: str = "runomics"
+    sport: str | None = None
+    start_time_local: str | None = None
+    duration_bests: dict[str, float] | None = None
+    gap_sec_per_km: float | None = None
+    gap_samples: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,7 +77,10 @@ class ActivityData:
             "week": self.week,
             "date": self.date,
             "dayOfWeek": self.day_of_week,
+            **({"startTimeLocal": self.start_time_local} if self.start_time_local else {}),
             "type": self.type,
+            "typeSource": self.type_source,
+            **({"sport": self.sport} if self.sport is not None else {}),
             "description": self.description,
             "durationSeconds": self.duration_seconds,
             "distanceKm": self.distance_km,
@@ -95,7 +103,10 @@ class ActivityData:
             "verticalRatioPct": self.vertical_ratio_pct,
             "strideLengthM": self.stride_length_m,
             "bestEfforts": self.best_efforts,
+            "durationBests": self.duration_bests,
             "paceSamples": self.pace_samples,
+            "gapSecPerKm": self.gap_sec_per_km,
+            "gapSamples": self.gap_samples,
             "vo2maxGarmin": self.vo2max_garmin,
             "avgTemperature": self.avg_temperature,
             "cadenceSamples": self.cadence_samples,
@@ -130,6 +141,14 @@ def parse_hr_zones(raw_zones: list[dict[str, Any]]) -> list[HrZone]:
         ))
 
     return result
+
+
+def grade_adjusted(parsed: ParsedFit | None, pace_sec_per_km: float | None) -> tuple[float | None, list[int] | None]:
+    """The run's grade-adjusted pace, and its stream picked from the same records as paceSamples, in whole seconds."""
+    if not parsed or not parsed.gap_factor or not pace_sec_per_km:
+        return None, None
+    samples = [round(v) for v in _decimate_list(parsed.gap_samples, _MAX_CHART_POINTS)] if parsed.gap_samples else None
+    return round(pace_sec_per_km / parsed.gap_factor, 1), samples
 
 
 def extract_gear_id(gear_list: list[dict[str, Any]] | None) -> str | None:
@@ -188,12 +207,17 @@ def map_activity(
     if distance_km > 0 and duration_seconds > 0:
         pace_sec_per_km = round(duration_seconds / distance_km, 1)
 
-    activity_type = infer_type(name, parsed)
+    type_inference = infer_type_with_source(
+        name,
+        parsed,
+        hr_zones=hr_zones or [],
+        duration_seconds=duration_seconds,
+    )
 
     avg_hr_raw = (parsed.avg_heart_rate if parsed else None) or api("averageHR", "avgHr")
     avg_heart_rate: int | None = int(avg_hr_raw) if avg_hr_raw else None
 
-    route = crop_privacy_zone(parsed.route) if parsed and parsed.route else None
+    route = parsed.route if parsed and parsed.route else None
 
     elevation_gain: float | None = None
     if parsed and parsed.elevation_gain_m > 0:
@@ -224,12 +248,15 @@ def map_activity(
         if parsed.cadence_samples:
             cadence_samples = _decimate_list(parsed.cadence_samples, _MAX_CHART_POINTS)
 
+    gap_sec_per_km, gap_samples = grade_adjusted(parsed, pace_sec_per_km)
+
     return ActivityData(
+        sport=(api("activityType", "activityTypeDTO") or {}).get("typeKey"),
         id=activity_id,
         week=iso_week,
         date=date_str,
         day_of_week=day_of_week,
-        type=activity_type,
+        type=type_inference.activity_type,
         description=name,
         duration_seconds=duration_seconds,
         distance_km=distance_km,
@@ -259,7 +286,23 @@ def map_activity(
         splits=parsed.splits if parsed and parsed.splits else None,
         gear_id=extract_gear_id(gear),
         weather=weather,
+        type_source=type_inference.source,
+        start_time_local=dt.strftime(_LOCAL_START_FORMAT),
+        duration_bests=(parsed.duration_bests or None) if parsed else None,
+        gap_sec_per_km=gap_sec_per_km,
+        gap_samples=gap_samples,
     )
+
+
+_LOCAL_START_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
+
+def local_start_time(raw: str | None) -> str | None:
+    """A list row's startTimeLocal in the format stored on activities, or None when it does not parse."""
+    try:
+        return _parse_datetime(str(raw or "")).strftime(_LOCAL_START_FORMAT)
+    except ValueError:
+        return None
 
 
 def _parse_datetime(raw: str) -> datetime:
@@ -268,7 +311,8 @@ def _parse_datetime(raw: str) -> datetime:
             return datetime.strptime(raw, fmt)
         except (ValueError, TypeError):
             pass
-    return datetime(1970, 1, 1)
+    # No 1970-01-01 fallback, which files a run under a month no view reads: the next run fetches it again.
+    raise ValueError(f"unreadable activity start time {raw!r}")
 
 
 def _decimate_list(items: list, max_points: int) -> list:

@@ -1,25 +1,29 @@
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { getShoeRegistry } from '@/infrastructure/repositories/JsonShoeRepository'
-import type { Activity } from '@/domain/activity/types'
+import type { ActivityType } from '@/domain/activity/types'
+import { kmPerWeek as computeKmPerWeek, wearPercent } from '@/domain/shoe/wearStatus'
 import { round } from '@/lib/math'
+import type { ShoeTypeBucket, ShoeDetail } from '@/domain/shoe/types'
 
-export interface ShoeDetail {
-  gearId: string
-  name: string
-  brand: string
-  maxKm: number
-  alertThresholdKm: number
-  retired: boolean
-  totalKm: number
-  wearPercent: number
-  firstUsedDate: string | null
-  kmPerWeek: number
-  activities: Activity[]
+export type { ShoeTypeBucket, ShoeDetail } from '@/domain/shoe/types'
+
+function mean(values: (number | null)[]): number | null {
+  const present = values.filter((v): v is number => v != null)
+  if (present.length === 0) return null
+  return present.reduce((sum, v) => sum + v, 0) / present.length
+}
+
+// One bucket per zone colour the run dots wear, so the bar matches the dots.
+function typeBucket(type: ActivityType): ShoeTypeBucket {
+  if (type === 'Base') return 'base'
+  if (type === 'Tempo') return 'tempo'
+  if (type === 'Threshold') return 'threshold'
+  return 'intervals'
 }
 
 export function getShoeDetail(gearId: string): ShoeDetail | null {
-  const info = getShoeRegistry()[gearId]
-  if (!info) return null
+  const registered = getShoeRegistry()[gearId]
+  if (!registered) return null
 
   const activities = getAllActivities()
     .filter((a) => a.gearId === gearId)
@@ -27,22 +31,37 @@ export function getShoeDetail(gearId: string): ShoeDetail | null {
 
   const totalKm = round(activities.reduce((sum, a) => sum + a.distanceKm, 0), 1)
   const firstUsedDate = activities.at(-1)?.date ?? null
-  const daysSinceFirstUse = firstUsedDate
-    ? Math.max(1, (Date.now() - new Date(firstUsedDate).getTime()) / 86_400_000)
-    : 0
-  const kmPerWeek = daysSinceFirstUse > 0 ? round((totalKm / daysSinceFirstUse) * 7, 1) : 0
+  const lastUsedDate = activities[0]?.date ?? null
+  const kmPerWeek = Math.round(computeKmPerWeek(firstUsedDate, lastUsedDate, totalKm))
+
+  const avgPaceSecPerKm = mean(activities.map((a) => a.paceSecPerKm))
+  const avgHeartRate = mean(activities.map((a) => a.avgHeartRate))
+
+  // By distance, not session count, as TypeDistribution splits a type mix.
+  const bucketDistance: Record<ShoeTypeBucket, number> = { base: 0, tempo: 0, threshold: 0, intervals: 0 }
+  for (const a of activities) bucketDistance[typeBucket(a.type)] += a.distanceKm
+  const share = (bucket: ShoeTypeBucket) => (totalKm === 0 ? 0 : Math.round((bucketDistance[bucket] / totalKm) * 100))
+  const typeShare: Record<ShoeTypeBucket, number> = {
+    base: share('base'),
+    tempo: share('tempo'),
+    threshold: share('threshold'),
+    intervals: share('intervals'),
+  }
 
   return {
     gearId,
-    name: info.name,
-    brand: info.brand,
-    maxKm: info.maxKm,
-    alertThresholdKm: info.alertThresholdKm,
-    retired: info.retired,
+    name: registered.name,
+    brand: registered.brand,
+    maxKm: registered.maxKm,
+    alertThresholdKm: registered.alertThresholdKm,
+    retired: registered.retired,
     totalKm,
-    wearPercent: info.retired ? 100 : Math.min(100, round((totalKm / info.maxKm) * 100, 0)),
+    wearPercent: wearPercent({ totalKm, maxKm: registered.maxKm, retired: registered.retired }),
     firstUsedDate,
     kmPerWeek,
+    avgPaceSecPerKm: avgPaceSecPerKm == null ? null : Math.round(avgPaceSecPerKm),
+    avgHeartRate: avgHeartRate == null ? null : Math.round(avgHeartRate),
+    typeShare,
     activities,
   }
 }

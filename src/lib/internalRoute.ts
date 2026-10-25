@@ -1,19 +1,14 @@
+import 'server-only'
 import { NextResponse, type NextRequest } from 'next/server'
-import { guardInternalRequest } from '@/lib/internalAuth'
+import { guardInternalRequest, isAuthorizedCronRequest, isAuthorizedInternalRequest, type InternalAuthorizer } from '@/lib/internalAuth'
 
-/**
- * Shared wrapper for /api/internal/* handlers: rate limit + secret check,
- * then run the handler with structured error logging. These endpoints are
- * called by unattended GitHub Actions crons, so a silent failure would
- * otherwise go unnoticed for weeks - every throw is logged with the route
- * name and returned as a 500 the workflow run can surface.
- */
 export async function handleInternalRoute(
   name: string,
   req: NextRequest,
-  handler: () => Promise<NextResponse>
+  handler: () => Promise<NextResponse>,
+  authorize: InternalAuthorizer = isAuthorizedInternalRequest
 ): Promise<NextResponse> {
-  const denied = guardInternalRequest(req)
+  const denied = guardInternalRequest(req, authorize)
   if (denied) return denied
 
   try {
@@ -21,5 +16,15 @@ export async function handleInternalRoute(
   } catch (error) {
     console.error(`[internal:${name}]`, error)
     return NextResponse.json({ error: 'Internal error' }, { status: 500 })
+  }
+}
+
+export type Trigger = 'cron' | 'manual'
+
+/** GET is Vercel Cron's call, POST with the internal secret a run by hand. */
+export function scheduledRoute(name: string, handler: (trigger: Trigger) => Promise<NextResponse>) {
+  return {
+    GET: (req: NextRequest) => handleInternalRoute(name, req, () => handler('cron'), isAuthorizedCronRequest),
+    POST: (req: NextRequest) => handleInternalRoute(name, req, () => handler('manual')),
   }
 }

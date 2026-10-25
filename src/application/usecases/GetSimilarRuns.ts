@@ -14,37 +14,43 @@ export interface SimilarRun {
   durationSeconds: number
   distanceKm: number
   paceSecPerKm: number
-  // 1-based position by pace among the matched runs (1 = fastest)
   rank: number
   isCurrent: boolean
 }
 
 export interface SimilarRunsData {
-  // All matched passes over this route, oldest first (chart order)
   runs: SimilarRun[]
   count: number
   currentRank: number
   bestPaceSecPerKm: number
 }
 
-// Below this many passes a "progression" reads as noise, so the card is hidden.
 const MIN_MATCHED_RUNS = 3
 
-// Cell sets are derived from immutable GPS traces, so they can be cached for
-// the lifetime of the process (one build / one server instance).
-const cellSetCache = new Map<string, RouteCellSet>()
+// Keyed by the activity object, so a new commit's runs start fresh and the old ones are collected.
+const cellSetCache = new WeakMap<Activity, RouteCellSet>()
 
 function cellSetFor(activity: Activity): RouteCellSet {
-  let cellSet = cellSetCache.get(activity.id)
+  let cellSet = cellSetCache.get(activity)
   if (!cellSet) {
     cellSet = buildRouteCellSet(activity.route ?? [])
-    cellSetCache.set(activity.id, cellSet)
+    cellSetCache.set(activity, cellSet)
   }
   return cellSet
 }
 
+// By the activity list, the same array until the data changes: a run's group is worked out once per data, not per render.
+const groups = new WeakMap<Activity[], Map<string, SimilarRunsData | null>>()
+
 export function getSimilarRuns(activityId: string): SimilarRunsData | null {
   const activities = getAllActivities()
+  let byId = groups.get(activities)
+  if (!byId) groups.set(activities, (byId = new Map()))
+  if (!byId.has(activityId)) byId.set(activityId, similarRuns(activities, activityId))
+  return byId.get(activityId) ?? null
+}
+
+function similarRuns(activities: Activity[], activityId: string): SimilarRunsData | null {
   const current = activities.find((a) => a.id === activityId)
   if (!current?.route || current.route.length < 2 || current.paceSecPerKm == null) return null
 

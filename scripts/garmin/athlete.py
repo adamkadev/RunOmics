@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-import json
+import re
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
-from .client import GarminAPIError, GarminClient
+from data_directory import get_data_dir
+from .client import GarminClient
+from .errors import GarminAPIError
+from .personal_api import PersonalApiClient
+from .shared import running_zone_config
+from repository.history_file import read_history_section, write_history
 
-_HISTORY_PATH = Path(__file__).parent.parent.parent / "public" / "data" / "athlete_history.json"
+_HISTORY_PATH = get_data_dir() / "athlete_history.json"
 
 # Threshold and capacity metrics worth a trend line. Garmin exposes only the
 # current value of each - there is no history endpoint - so the series is built
@@ -26,15 +30,38 @@ def _age_from_birthdate(birth_date: date) -> int:
     return today.year - birth_date.year - (0 if had_birthday_this_year else 1)
 
 
-def _fetch_zone_config(client: GarminClient) -> dict[str, Any] | None:
+def _fetch_zone_config(client: GarminClient | PersonalApiClient) -> dict[str, Any] | None:
     """Garmin's heart rate zone config for running, falling back to the all-sport default."""
     try:
-        zones = client.get_heart_rate_zones()
+        return running_zone_config(client.get_heart_rate_zones())
     except GarminAPIError:
         return None
 
-    by_sport = {zone.get("sport"): zone for zone in zones}
-    return by_sport.get("RUNNING") or by_sport.get("DEFAULT")
+
+def zone_metrics(zone_config: dict[str, Any] | None, lthr: float | None) -> dict[str, Any]:
+    """Zone floors, max and resting HR from Garmin's zone config; floors from
+    LTHR percentages when there is no config to read them from."""
+    metrics: dict[str, Any] = {}
+    if zone_config:
+        floors = [zone_config.get(f"zone{n}Floor") for n in range(1, 6)]
+        # `all()` would discard the whole set over a zone 1 floor of 0, which
+        # Garmin reports for %maxHR-based profiles, and fall back to zones
+        # derived from LTHR percentages. Latent rather than observed: this
+        # athlete is on %LTHR, where the fallback happens to agree.
+        if all(floor is not None for floor in floors):
+            metrics["hrZoneBoundsBpm"] = [round(floor) for floor in floors]
+
+        max_hr = zone_config.get("maxHeartRateUsed")
+        if max_hr:
+            metrics["maxHrBpm"] = round(max_hr)
+
+        resting_hr = zone_config.get("restingHeartRateUsed")
+        if resting_hr:
+            metrics["restingHrBpm"] = round(resting_hr)
+
+    if lthr and "hrZoneBoundsBpm" not in metrics:
+        metrics["hrZoneBoundsBpm"] = [round(lthr * p) for p in _ZONE_PERCENTS]
+    return metrics
 
 
 def extract_fitness_age(days: list[dict[str, Any]]) -> dict[str, Any]:
@@ -65,10 +92,78 @@ def extract_fitness_age(days: list[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
 
+def extract_current_fitness_age(payload: dict[str, Any]) -> dict[str, Any]:
+    """Allowlisted current Fitness Age values and their Garmin freshness dates."""
+    if not isinstance(payload, dict):
+        return {}
+    metrics: dict[str, Any] = {}
+
+    fitness_age = payload.get("fitnessAge")
+    if isinstance(fitness_age, (int, float)) and not isinstance(fitness_age, bool):
+        metrics["fitnessAgeYrs"] = round(fitness_age, 1)
+
+    achievable = payload.get("achievableFitnessAge")
+    if isinstance(achievable, (int, float)) and not isinstance(achievable, bool):
+        metrics["achievableFitnessAgeYrs"] = round(achievable, 1)
+
+    components = payload.get("components")
+    bmi_component = components.get("bmi") if isinstance(components, dict) else None
+    if isinstance(bmi_component, dict):
+        bmi = bmi_component.get("value")
+        if isinstance(bmi, (int, float)) and not isinstance(bmi, bool):
+            metrics["bmi"] = round(bmi, 1)
+        if "bmi" in metrics:
+            measured_at = _normalized_date(bmi_component.get("lastMeasurementDate"))
+            if measured_at:
+                metrics["bmiMeasurementDate"] = measured_at
+
+    # Do not persist metadata without a metric for it to describe.
+    last_updated = _normalized_datetime(payload.get("lastUpdated"))
+    if metrics and last_updated:
+        metrics["fitnessAgeLastUpdated"] = last_updated
+
+    return metrics
+
+
+def _normalized_date(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _normalized_datetime(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.replace("Z", "+00:00")
+    candidate = re.sub(
+        r"\.(\d{1,6})(?=(?:[+-]\d{2}:\d{2})?$)",
+        lambda match: "." + match.group(1).ljust(6, "0"),
+        candidate,
+    )
+    try:
+        return datetime.fromisoformat(candidate).isoformat()
+    except ValueError:
+        return None
+
+
 def _fetch_fitness_age(client: GarminClient) -> dict[str, Any]:
     today = date.today()
     try:
-        days = client.get_fitness_age((today - timedelta(days=6)).isoformat(), today.isoformat())
+        current = extract_current_fitness_age(client.get_current_fitness_age(today.isoformat()))
+    except GarminAPIError:
+        current = {}
+    if current:
+        return current
+
+    # The daily endpoint remains a valid fallback. A successful [] is simply
+    # an empty result and must not be treated as an error or unsupported data.
+    try:
+        days = client.get_fitness_age(
+            (today - timedelta(days=6)).isoformat(), today.isoformat()
+        )
     except GarminAPIError:
         return {}
     return extract_fitness_age(days)
@@ -133,20 +228,14 @@ def record_athlete_history(metrics: dict[str, Any], today: date | None = None) -
     if not snapshot:
         return False
 
-    days: dict[str, Any] = {}
-    if _HISTORY_PATH.exists():
-        try:
-            days = json.loads(_HISTORY_PATH.read_text()).get("days") or {}
-        except Exception:
-            days = {}
+    days: dict[str, Any] = read_history_section(_HISTORY_PATH, "days")
 
     latest = days[max(days)] if days else None
     if latest == snapshot:
         return False
 
     days[(today or date.today()).isoformat()] = snapshot
-    _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _HISTORY_PATH.write_text(json.dumps({"days": dict(sorted(days.items()))}, indent=2) + "\n")
+    write_history(_HISTORY_PATH, {"days": dict(sorted(days.items()))})
     return True
 
 
@@ -162,22 +251,7 @@ def fetch_athlete_metrics(client: GarminClient) -> dict[str, Any]:
     if lthr:
         metrics["lthrBpm"] = round(lthr)
 
-    zone_config = _fetch_zone_config(client)
-    if zone_config:
-        floors = [zone_config.get(f"zone{n}Floor") for n in range(1, 6)]
-        if all(floors):
-            metrics["hrZoneBoundsBpm"] = [round(floor) for floor in floors]
-
-        max_hr = zone_config.get("maxHeartRateUsed")
-        if max_hr:
-            metrics["maxHrBpm"] = round(max_hr)
-
-        resting_hr = zone_config.get("restingHeartRateUsed")
-        if resting_hr:
-            metrics["restingHrBpm"] = round(resting_hr)
-
-    if lthr and "hrZoneBoundsBpm" not in metrics:
-        metrics["hrZoneBoundsBpm"] = [round(lthr * p) for p in _ZONE_PERCENTS]
+    metrics.update(zone_metrics(_fetch_zone_config(client), lthr))
 
     birth_date = user_data.get("birthDate")
     if birth_date:
@@ -211,3 +285,63 @@ def fetch_athlete_metrics(client: GarminClient) -> dict[str, Any]:
         metrics["lastUpdate"] = datetime.now(timezone.utc).isoformat()
 
     return metrics
+
+
+def latest_weight_kg(payload: Any) -> float | None:
+    """The most recent weigh-in of a weight-service range, in kg (Garmin sends grams)."""
+    summaries = payload.get("dailyWeightSummaries") if isinstance(payload, dict) else None
+    weighed: list[tuple[str, float]] = []
+    for summary in summaries if isinstance(summaries, list) else []:
+        if not isinstance(summary, dict):
+            continue
+        grams = (summary.get("latestWeight") or {}).get("weight")
+        day = summary.get("summaryDate")
+        if isinstance(day, str) and isinstance(grams, (int, float)) and grams > 0:
+            weighed.append((day, grams))
+    return round(max(weighed)[1] / 1000, 1) if weighed else None
+
+
+def fetch_personal_athlete_metrics(client: PersonalApiClient, today: date | None = None) -> dict[str, Any]:
+    """What the Personal API knows of the athlete: the zones and the LTHR they
+    are built on, fitness age and age, and the latest weigh-in.
+
+    Sex, height, threshold pace, VO2max and the watch come from Connect's user
+    settings and device info (fetch_athlete_metrics). Without garth they keep
+    the values last stored - but VO2max, which the sync carries on from the
+    runs' FIT readings (vo2max_metrics).
+    """
+    today = today or date.today()
+    zone_config = _fetch_zone_config(client)
+    lthr = (zone_config or {}).get("lactateThresholdHeartRateUsed")
+    metrics = zone_metrics(zone_config, lthr)
+    if lthr:
+        metrics["lthrBpm"] = round(lthr)
+
+    try:
+        fitness = client.get_current_fitness_age(today.isoformat())
+    except GarminAPIError:
+        fitness = {}
+    metrics.update(extract_current_fitness_age(fitness))
+    age = fitness.get("chronologicalAge")
+    if isinstance(age, int) and not isinstance(age, bool) and age > 0:
+        metrics["age"] = age
+
+    try:
+        weight = latest_weight_kg(client.get_weight_range((today - timedelta(days=365)).isoformat(), today.isoformat()))
+    except GarminAPIError:
+        weight = None
+    if weight:
+        metrics["weightKg"] = weight
+
+    if metrics:
+        metrics["lastUpdate"] = datetime.now(timezone.utc).isoformat()
+    return metrics
+
+
+
+def vo2max_metrics(vo2max: float) -> dict[str, Any]:
+    """VO2max and VMA from a run's FIT reading, in the whole points Connect
+    reports. Half up: a reading runs about 0.1 under Connect's precise value,
+    so a stored x.5 is likelier Connect's x+1 than its x."""
+    whole = float(int(vo2max + 0.5))
+    return {"vo2maxMlKgMin": whole, "vmaKmh": round(whole / _VO2_PER_KMH, 1)}

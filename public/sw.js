@@ -1,25 +1,17 @@
-/* RunOmics service worker: offline app shell + push notifications.
- *
- * Caching strategy:
- * - Hashed build assets (/_next/static) and icons: cache-first (immutable).
- * - Pages, RSC payloads and /data JSON: network-first with cache fallback,
- *   so the app opens with the last-seen content when offline.
- * - /api and cross-origin requests (map tiles, analytics) are never cached.
- *
- * Push events display FCM webpush payloads ({ notification: { title, body } })
- * so a separate firebase-messaging-sw.js is not needed.
- *
- * Bump VERSION to invalidate all caches on deploy of a breaking change.
- */
-
-const VERSION = 'v1'
+const VERSION = new URL(self.location.href).searchParams.get('v') || 'v1'
 const STATIC_CACHE = `runomics-static-${VERSION}`
 const PAGE_CACHE = `runomics-pages-${VERSION}`
 const CURRENT_CACHES = [STATIC_CACHE, PAGE_CACHE]
 
-const SHELL_URLS = ['/', '/manifest.json', '/icons/logo.svg', '/icons/apple-touch-icon.png']
+// Every file here must exist: cache.addAll fails the whole install on one 404, and the old worker keeps the app.
+const SHELL_URLS = ['/', '/manifest.json', '/icons/favicon.svg', '/icons/apple-touch-icon.png']
 
 self.addEventListener('install', (event) => {
+  if (isLocalDev) {
+    event.waitUntil(self.skipWaiting())
+    return
+  }
+
   event.waitUntil(
     caches
       .open(PAGE_CACHE)
@@ -33,16 +25,36 @@ self.addEventListener('message', (event) => {
 })
 
 self.addEventListener('activate', (event) => {
+  // A worker left on localhost by a local production build retires itself so it never shadows a dev server.
+  if (isLocalDev) {
+    event.waitUntil(
+      caches
+        .keys()
+        .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+        .then(() => self.registration.unregister())
+    )
+    return
+  }
+
   event.waitUntil(
     caches
       .keys()
       .then((keys) => Promise.all(keys.filter((k) => !CURRENT_CACHES.includes(k)).map((k) => caches.delete(k))))
+      // The page request starts while the worker boots, instead of after it.
+      .then(() => self.registration.navigationPreload?.enable())
       .then(() => self.clients.claim())
   )
 })
 
+// Dev builds reuse the same /_next/static/chunks/... URLs across rebuilds, so cache-first would pin stale chunks.
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+const isLocalDev = LOCAL_HOSTS.includes(self.location.hostname)
+
+// MapLibre's worker sits under its version (scripts/copy-maplibre-worker.mjs), so a new one comes at a new path.
+const VERSIONED_MAPLIBRE = /^\/maplibre\/[^/]+\//
+
 function isImmutableAsset(url) {
-  return url.pathname.startsWith('/_next/static/') || url.pathname.startsWith('/icons/')
+  return url.pathname.startsWith('/_next/static/') || url.pathname.startsWith('/icons/') || VERSIONED_MAPLIBRE.test(url.pathname)
 }
 
 async function cacheFirst(request) {
@@ -56,14 +68,33 @@ async function cacheFirst(request) {
   return response
 }
 
-async function networkFirst(request, { isNavigation }) {
+/** A page this slow on a bad connection opens from its cached copy; the network's answer still updates the cache. */
+const NAVIGATION_TIMEOUT_MS = 3000
+
+async function fromNetwork(event) {
+  const { request } = event
+  const preloaded = request.mode === 'navigate' ? await event.preloadResponse : undefined
+  const response = preloaded || (await fetch(request))
+  // Never a redirected one: on a private site that is /sign-in, which must not be cached as the page.
+  if (response.ok && !response.redirected) {
+    const copy = response.clone()
+    // Written while the page streams: awaited, the page would arrive only once its whole body reached the disk.
+    event.waitUntil(caches.open(PAGE_CACHE).then((cache) => cache.put(request, copy)).catch(() => undefined))
+  }
+  return response
+}
+
+function cachedAfter(request, ms) {
+  return new Promise((resolve) => setTimeout(() => caches.match(request).then(resolve, () => resolve(undefined)), ms))
+}
+
+async function networkFirst(event, { isNavigation }) {
+  const { request } = event
+  const network = fromNetwork(event)
   try {
-    const response = await fetch(request)
-    if (response.ok) {
-      const cache = await caches.open(PAGE_CACHE)
-      cache.put(request, response.clone())
-    }
-    return response
+    if (!isNavigation) return await network
+    event.waitUntil(network.catch(() => undefined))
+    return (await Promise.race([network, cachedAfter(request, NAVIGATION_TIMEOUT_MS)])) || (await network)
   } catch (err) {
     const cached = await caches.match(request)
     if (cached) return cached
@@ -77,27 +108,28 @@ async function networkFirst(request, { isNavigation }) {
 
 self.addEventListener('fetch', (event) => {
   const { request } = event
+  if (isLocalDev) return
   if (request.method !== 'GET') return
 
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
   if (url.pathname.startsWith('/api/')) return
+  // A prefetch is a partial payload, no offline copy of a page: it goes straight to the network, uncached.
+  if (request.headers.has('Next-Router-Prefetch')) return
 
   if (isImmutableAsset(url)) {
     event.respondWith(cacheFirst(request))
     return
   }
 
-  event.respondWith(networkFirst(request, { isNavigation: request.mode === 'navigate' }))
+  event.respondWith(networkFirst(event, { isNavigation: request.mode === 'navigate' }))
 })
 
 self.addEventListener('push', (event) => {
   let payload = {}
   try {
     payload = event.data ? event.data.json() : {}
-  } catch {
-    /* non-JSON push: show the generic notification below */
-  }
+  } catch {}
   const notification = payload.notification ?? {}
   const url = payload.fcmOptions?.link ?? '/'
   event.waitUntil(

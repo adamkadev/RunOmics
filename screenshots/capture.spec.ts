@@ -11,16 +11,19 @@ import {
   type Theme,
 } from './routes'
 import { ACCENT_STORAGE_KEY } from '@/lib/accent'
+import { signInAsOwner } from './owner'
 
 const OUTPUT_DIR = path.join(__dirname, 'output')
 
-// next-themes stores the chosen theme under this localStorage key (its default,
-// and providers.tsx doesn't override `storageKey`). Seeding it before the first
-// paint - together with the emulated color-scheme - pins light/dark deterministically.
 const THEME_STORAGE_KEY = 'theme'
 
-// Kill every transition/animation so the aurora background, tab underline, page
-// transitions, etc. hold still - otherwise two runs of the same screen diff.
+// An iPhone 15 Pro's insets: env(safe-area-inset-*) is 0 in headless Chromium unless it is told otherwise.
+const SAFE_AREA = { top: 59, bottom: 34, left: 0, right: 0 }
+
+// More than the fixed header and tab bar cover, so every line of the page is clear of both in one screen.
+const SCREEN_OVERLAP = 220
+const MAX_SCREENS = 6
+
 const FREEZE_MOTION_CSS = `
   *, *::before, *::after {
     transition: none !important;
@@ -40,60 +43,37 @@ function slugify(text: string): string {
   )
 }
 
-/** Scroll to a fraction of the scrollable height and let layout settle. */
-async function scrollToFraction(page: Page, fraction: number): Promise<void> {
-  await page.evaluate((f) => {
-    const max = document.documentElement.scrollHeight - window.innerHeight
-    window.scrollTo(0, Math.max(0, Math.round(max * f)))
-  }, fraction)
+async function scrollTo(page: Page, y: number): Promise<void> {
+  await page.evaluate((top) => window.scrollTo(0, top), y)
   await page.waitForTimeout(250)
 }
 
-async function isScrollable(page: Page): Promise<boolean> {
-  return page.evaluate(
-    () => document.documentElement.scrollHeight - window.innerHeight > 40
-  )
-}
-
-/**
- * Shoot begin/middle/end viewport frames (what a phone screen actually shows),
- * plus one stitched full-page frame. Short pages that don't scroll only get a
- * single `full` frame to avoid three identical files.
- */
-async function captureScrolls(page: Page, dir: string, prefix: string): Promise<void> {
+async function captureScreens(page: Page, dir: string, prefix: string): Promise<void> {
   fs.mkdirSync(dir, { recursive: true })
   const p = (name: string) => path.join(dir, prefix ? `${prefix}-${name}.png` : `${name}.png`)
 
-  const scrollable = await isScrollable(page)
+  const { scrollable, viewport } = await page.evaluate(() => ({
+    scrollable: document.documentElement.scrollHeight - window.innerHeight,
+    viewport: window.innerHeight,
+  }))
+  const step = viewport - SCREEN_OVERLAP
+  const screens = Math.min(MAX_SCREENS, 1 + Math.ceil(Math.max(0, scrollable - 40) / step))
 
-  await scrollToFraction(page, 0)
-  await page.screenshot({ path: p('begin') })
-
-  if (scrollable) {
-    await scrollToFraction(page, 0.5)
-    await page.screenshot({ path: p('middle') })
-
-    await scrollToFraction(page, 1)
-    await page.screenshot({ path: p('end') })
-
-    await scrollToFraction(page, 0)
+  for (let i = 0; i < screens; i++) {
+    await scrollTo(page, Math.min(i * step, scrollable))
+    await page.screenshot({ path: p(`screen-${i + 1}`) })
   }
 
+  await scrollTo(page, 0)
   await page.screenshot({ path: p('full'), fullPage: true })
 }
 
-async function gotoAndSettle(page: Page, route: RouteSpec, theme: Theme, accent: Accent): Promise<void> {
-  // Seed the theme + the accent palette before any app script runs, so the very
-  // first paint is already in the right mode (no light->dark or nature->x flash).
-  // layout.tsx's beforeInteractive script reads the accent key and stamps
-  // `data-accent` from it, which is what the palette CSS keys off.
+async function preparePage(page: Page, theme: Theme, accent: Accent): Promise<void> {
   await page.addInitScript(
     (entries) => {
       try {
         for (const [key, value] of entries) localStorage.setItem(key, value)
-      } catch {
-        /* private mode etc. - the emulated color-scheme still covers us */
-      }
+      } catch {}
     },
     [
       [THEME_STORAGE_KEY, theme],
@@ -101,13 +81,24 @@ async function gotoAndSettle(page: Page, route: RouteSpec, theme: Theme, accent:
     ] as const
   )
 
-  // Reduce motion for any prefers-reduced-motion CSS (belt-and-braces with the
-  // freeze stylesheet added after load).
   await page.emulateMedia({ reducedMotion: 'reduce' })
 
-  await page.goto(route.path, { waitUntil: 'domcontentloaded' })
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: SAFE_AREA })
+}
 
-  // Wait for the app's real content, not just the shell.
+async function resolvePath(page: Page, route: RouteSpec): Promise<string> {
+  if (!route.firstLinkTo) return route.path
+
+  await page.goto(route.path, { waitUntil: 'domcontentloaded' })
+  const href = await page.locator(`main a[href^="${route.firstLinkTo}"]`).first().getAttribute('href')
+  if (!href) throw new Error(`${route.path} has no link to ${route.firstLinkTo}...`)
+  return href
+}
+
+async function gotoAndSettle(page: Page, url: string, route: RouteSpec, theme: Theme, accent: Accent): Promise<void> {
+  await page.goto(url, { waitUntil: 'domcontentloaded' })
+
   if (route.waitFor) {
     await page.locator(route.waitFor).first().waitFor({ state: 'visible', timeout: 15_000 })
   } else {
@@ -118,15 +109,16 @@ async function gotoAndSettle(page: Page, route: RouteSpec, theme: Theme, accent:
       .catch(() => {})
   }
 
-  // Confirm next-themes resolved to the class we asked for before shooting.
+  if (route.settledWhen) {
+    await page.locator(route.settledWhen).first().waitFor({ state: 'attached', timeout: 10_000 }).catch(() => {})
+  }
+
   await page
     .waitForFunction((t) => document.documentElement.classList.contains(t), theme, {
       timeout: 5_000,
     })
     .catch(() => {})
 
-  // Same for the accent. The default one is the bare stylesheet, so it is the
-  // *absence* of the attribute we wait on there.
   await page
     .waitForFunction(
       (a) => {
@@ -146,25 +138,32 @@ async function gotoAndSettle(page: Page, route: RouteSpec, theme: Theme, accent:
 for (const accent of selectedAccents()) {
   for (const theme of selectedThemes()) {
     test.describe(`${accent} / ${theme} mode`, () => {
-      // Emulated color-scheme backs up the seeded localStorage value for any
-      // prefers-color-scheme CSS and for the pre-hydration paint.
       test.use({ colorScheme: theme })
 
       for (const route of ROUTES) {
         test(`${route.name}`, async ({ page }) => {
           const dir = path.join(OUTPUT_DIR, accent, theme, route.name)
-          await gotoAndSettle(page, route, theme, accent)
-          await captureScrolls(page, dir, '')
+          await preparePage(page, theme, accent)
+          await gotoAndSettle(page, await resolvePath(page, route), route, theme, accent)
+          if (route.asOwner) {
+            test.skip(!!process.env.SCREENSHOT_BASE_URL, 'the owner capture needs the local Auth emulator')
+            await signInAsOwner(page)
+            await page.waitForTimeout(600)
+          }
+          await captureScreens(page, dir, '')
 
           if (route.hasTabs) {
             const tabs = page.getByRole('tab')
             const count = await tabs.count()
+            // The tab open on arrival is the page already captured above.
+            const open = await tabs.evaluateAll((els) => els.findIndex((el) => el.getAttribute('aria-selected') === 'true'))
             for (let i = 0; i < count; i++) {
+              if (i === open) continue
               const tab = tabs.nth(i)
               const label = slugify((await tab.textContent())?.trim() ?? `tab-${i}`)
               await tab.click()
               await page.waitForTimeout(400)
-              await captureScrolls(page, dir, `tab-${i + 1}-${label}`)
+              await captureScreens(page, dir, `tab-${i + 1}-${label}`)
             }
           }
         })

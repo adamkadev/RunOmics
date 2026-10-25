@@ -1,112 +1,214 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { GeoJSONSource, Map as MapLibreMap, Marker, StyleSpecification } from "maplibre-gl";
+import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect } from "react";
+import type { FeatureCollection } from "geojson";
+import type { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import type { MapShellData } from "@/application/usecases/GetAllRoutes";
-import { maptilerStyleUrl } from "@/lib/maptiler";
-import {
-  buildHeatGeoJSON,
-  clusterBubbleRadius,
-  heatColorExpression,
-  heatWidthExpression,
-} from "./mapUtils";
-import { MAP_COLORS } from "@/lib/colors";
+import { heatBasemapStyle, maptilerStyle } from "@/lib/maptiler";
+import { percentileBounds, type CameraPadding, type LngLatBounds } from "@/lib/routeFrame";
+import { firstSymbolLayerId, loadMapLibre } from "@/lib/maplibre";
+import { EDGE_FENCE_LAYER, EDGE_FENCE_SOURCE, addEdgeFence } from "@/lib/runMapLayers";
+import { heatAccent, hexToRgb, rgbCss, scale } from "@/lib/heatRamp";
+import { parseAccent } from "@/lib/accent";
+import { HEAT_LAYER, HEAT_SOURCE, addHeatLayer, type HeatLayer } from "./heatLayer";
+import { buildHeatTracks, ringCoordinates } from "./mapUtils";
+import { MAP_PADDING } from "@/lib/routeFrame";
+import { watchMapMoving } from "@/lib/mapMoving";
 
-// One DOM circle per zone for the world view - simpler and more robust than a GL
-// symbol layer, which would need a text-font guaranteed present in the vector
-// style's glyph set just to print a route count.
-// Bubbles above this diameter show the zone name under the count - small bubbles stay count-only.
-const LABELED_BUBBLE_SIZE = 44;
-
-// Reveal the heat trace in steps instead of popping in all at once - color/width
-// stay fixed on the final maxCount throughout so the ramp doesn't shift mid-animation.
-const REVEAL_STEPS = 16;
-const REVEAL_STEP_MS = 45;
-
-function mkClusterMarker(count: number, radius: number, name: string, label: string, isDark: boolean): HTMLDivElement {
-  const size = radius * 2;
-  const el = document.createElement("div");
-  el.setAttribute("role", "button");
-  el.setAttribute("tabindex", "0");
-  el.setAttribute("aria-label", label);
-  el.title = label;
-  Object.assign(el.style, {
-    width: `${size}px`,
-    height: `${size}px`,
-    borderRadius: "50%",
-    backgroundColor: "color-mix(in srgb, var(--accent) 80%, transparent)",
-    border: `2px solid ${isDark ? MAP_COLORS.markerRingDark : MAP_COLORS.markerRingLight}`,
-    boxShadow: MAP_COLORS.markerShadow,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    color: MAP_COLORS.markerLabel,
-    fontWeight: "700",
-    fontSize: size > LABELED_BUBBLE_SIZE ? "14px" : "12px",
-    cursor: "pointer",
-    textAlign: "center",
-    lineHeight: "1.1",
-  });
-
-  const countEl = document.createElement("span");
-  countEl.textContent = String(count);
-  el.appendChild(countEl);
-
-  if (size > LABELED_BUBBLE_SIZE && name) {
-    const nameEl = document.createElement("span");
-    nameEl.textContent = name;
-    Object.assign(nameEl.style, {
-      fontSize: "9px",
-      fontWeight: "500",
-      opacity: "0.85",
-      maxWidth: `${size - 8}px`,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-    });
-    el.appendChild(nameEl);
-  }
-
-  return el;
+export function fitPadding(fullscreen: boolean) {
+  return fullscreen ? MAP_PADDING.fullscreen : MAP_PADDING.card;
 }
+const FIT_MAX_ZOOM = 14;
+const FIT_MS = 800;
+
+const RING_SOURCE = "home-ring";
+/** 4 px dashes 6 px apart: a dash array counts in line widths. */
+const RING = { width: 1.2, opacity: 0.8, dash: [4 / 1.2, 6 / 1.2] } as const;
+/** The accent itself reads too pale on the light ground. */
+const RING_LIGHT_SHADE = 0.55;
+const DOT_SOURCE = "home-dot";
+
+export interface HomeRing {
+  center: [number, number];
+  radiusKm: number;
+}
+
+const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
+
+function ringData(ring: HomeRing | null): { ring: FeatureCollection; dot: FeatureCollection } {
+  if (!ring) return { ring: EMPTY, dot: EMPTY };
+  return {
+    ring: {
+      type: "FeatureCollection",
+      features: [{ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: ringCoordinates(ring.center, ring.radiusKm) } }],
+    },
+    dot: {
+      type: "FeatureCollection",
+      features: [{ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: ring.center } }],
+    },
+  };
+}
+
+/**
+ * Added after the run layers on every style load and accent change, and
+ * removed before them, so a swap redraws them in the same order.
+ */
+export interface MapOverlay {
+  add(map: MapLibreMap, ctx: { dark: boolean }): void;
+  remove(map: MapLibreMap): void;
+}
+
+export interface MapRoutesOptions {
+  /** May change identity; the hook swaps it in place. */
+  overlay?: MapOverlay;
+  fitOverride?: LngLatBounds | null;
+  /** Defaults to the frame's own padding. */
+  fitOverridePadding?: CameraPadding;
+}
+
+const boundsKey = (b: LngLatBounds | null | undefined) =>
+  b ? [b.minLon, b.minLat, b.maxLon, b.maxLat].map((v) => v.toFixed(5)).join() : "";
+const paddingKey = (p: CameraPadding | undefined) => (p ? [p.top, p.right, p.bottom, p.left].join() : "");
+
+const isDarkPage = () => document.documentElement.classList.contains("dark");
+
+/** An overlay's failure never takes the heat down with it. */
+function drawOverlay(overlay: MapOverlay, map: MapLibreMap): boolean {
+  try {
+    overlay.add(map, { dark: isDarkPage() });
+    return true;
+  } catch (err) {
+    console.warn("Map overlay failed to draw", err);
+    return false;
+  }
+}
+
+function eraseOverlay(overlay: MapOverlay | null, map: MapLibreMap): void {
+  try {
+    overlay?.remove(map);
+  } catch (err) {
+    console.warn("Map overlay failed to clear", err);
+  }
+}
+
+const boundsArray = (b: LngLatBounds): [[number, number], [number, number]] => [
+  [b.minLon, b.minLat],
+  [b.maxLon, b.maxLat],
+];
 
 export function useMapRoutes(
   data: MapShellData,
   routes: [number, number][][],
   selectedIdx: number,
   visibleIndices: number[],
-  worldView: boolean,
-  clusterCounts: number[],
-  clusterNames: string[],
-  onSelectCluster: (idx: number) => void,
+  ring: HomeRing | null,
+  fullscreen = false,
+  { overlay, fitOverride, fitOverridePadding }: MapRoutesOptions = {},
 ) {
+  // Read when the map is made; the fit below follows it.
+  const fullscreenRef = useRef(fullscreen);
+  useLayoutEffect(() => {
+    fullscreenRef.current = fullscreen;
+  }, [fullscreen]);
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const mglRef = useRef<typeof import("maplibre-gl") | null>(null);
-  const clusterMarkersRef = useRef<Marker[]>([]);
+  const heatRef = useRef<HeatLayer | null>(null);
   const [mapReady, setMapReady] = useState(false);
-
-  const onSelectClusterRef = useRef(onSelectCluster);
-  useEffect(() => {
-    onSelectClusterRef.current = onSelectCluster;
-  }, [onSelectCluster]);
+  const overlayRef = useRef<MapOverlay | undefined>(overlay);
+  const drawnOverlayRef = useRef<MapOverlay | null>(null);
+  // False from a theme swap's setStyle until its style.load: no layer can be added meanwhile.
+  const styleLoadedRef = useRef(false);
+  useLayoutEffect(() => {
+    overlayRef.current = overlay;
+  }, [overlay]);
 
   const { clusters } = data;
   const selected = clusters[selectedIdx];
 
-  const clearClusterMarkers = useCallback(() => {
-    clusterMarkersRef.current.forEach((m) => m.remove());
-    clusterMarkersRef.current = [];
-  }, []);
+  const frame = useMemo(() => {
+    const loaded = visibleIndices.map((i) => routes[i]).filter((coords): coords is [number, number][] => !!coords);
+    // Every run of the area shown: the server's frame is the same one, already worked out.
+    if (selected && loaded.length === selected.routeIndices.length && visibleIndices.length === selected.routeIndices.length) return selected.frame;
+    return (loaded.length ? percentileBounds(loaded) : null) ?? selected?.frame ?? null;
+  }, [routes, visibleIndices, selected]);
+  const frameKey = boundsKey(frame);
+  const fitTarget = fitOverride ?? frame;
+  const fitKey = fitOverride ? `override:${boundsKey(fitOverride)}:${paddingKey(fitOverridePadding)}` : frameKey;
+
+  // Kept so a new style or accent can redraw them.
+  const tracksRef = useRef<Float64Array[]>([]);
+  const ringRef = useRef<HomeRing | null>(ring);
 
   useEffect(() => {
     if (!containerRef.current || !clusters.length) return;
     let cancelled = false;
+    let fenceCleanup: (() => void) | null = null;
+    const isDark = isDarkPage;
+    // The accent's full colour in both modes, not the darker light-mode UI accent.
+    const readAccent = () => heatAccent(parseAccent(document.documentElement.getAttribute("data-accent")));
 
-    async function initMap(isDark: boolean) {
-      const mgl = await import("maplibre-gl");
-      await import("maplibre-gl/dist/maplibre-gl.css");
+    function removeRunLayers(map: MapLibreMap) {
+      eraseOverlay(drawnOverlayRef.current, map);
+      drawnOverlayRef.current = null;
+      heatRef.current?.remove();
+      heatRef.current = null;
+      fenceCleanup?.();
+      fenceCleanup = null;
+      for (const id of [DOT_SOURCE, RING_SOURCE, HEAT_LAYER, EDGE_FENCE_LAYER]) if (map.getLayer(id)) map.removeLayer(id);
+      for (const id of [DOT_SOURCE, RING_SOURCE, HEAT_SOURCE, EDGE_FENCE_SOURCE]) if (map.getSource(id)) map.removeSource(id);
+    }
+
+    // A new style wipes the run layers and a new accent repaints them: both
+    // call this again with what is on screen.
+    function addRunLayers(map: MapLibreMap) {
+      removeRunLayers(map);
+      const accent = readAccent();
+      const firstSymbolId = firstSymbolLayerId(map);
+
+      heatRef.current = addHeatLayer(map, isDark() ? "dark" : "light", accent, firstSymbolId);
+      heatRef.current.setTracks(tracksRef.current, false);
+
+      const { ring: ringLine, dot } = ringData(ringRef.current);
+      map.addSource(RING_SOURCE, { type: "geojson", data: ringLine });
+      map.addLayer(
+        {
+          id: RING_SOURCE,
+          type: "line",
+          source: RING_SOURCE,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-color": isDark() ? accent : rgbCss(scale(hexToRgb(accent), RING_LIGHT_SHADE)),
+            "line-width": RING.width,
+            "line-opacity": RING.opacity,
+            "line-dasharray": [...RING.dash],
+          },
+        },
+        firstSymbolId,
+      );
+      map.addSource(DOT_SOURCE, { type: "geojson", data: dot });
+      map.addLayer(
+        {
+          id: DOT_SOURCE,
+          type: "circle",
+          source: DOT_SOURCE,
+          paint: {
+            "circle-radius": 3,
+            "circle-color": accent,
+            "circle-stroke-width": 2,
+            "circle-stroke-color": "#ffffff",
+          },
+        },
+        firstSymbolId,
+      );
+
+      fenceCleanup = addEdgeFence(map);
+
+      const extra = overlayRef.current;
+      if (extra && drawOverlay(extra, map)) drawnOverlayRef.current = extra;
+    }
+
+    async function initMap() {
+      const mgl = await loadMapLibre();
       if (cancelled) return;
 
       const token = process.env.NEXT_PUBLIC_MAPTILER_TOKEN;
@@ -115,198 +217,131 @@ export function useMapRoutes(
         return;
       }
 
-      clearClusterMarkers();
-      mapRef.current?.remove();
-      mapRef.current = null;
-      setMapReady(false);
-
       const first = clusters[data.defaultClusterIdx];
       if (!first) return;
+      let dark = isDark();
+      let accent = readAccent();
       const map = new mgl.Map({
         container: containerRef.current!,
-        style: maptilerStyleUrl(isDark, token),
-        bounds: [
-          [first.bounds.minLon, first.bounds.minLat],
-          [first.bounds.maxLon, first.bounds.maxLat],
-        ],
-        fitBoundsOptions: { padding: 60, maxZoom: 14 },
+        style: heatBasemapStyle(maptilerStyle(dark, token), dark),
+        bounds: boundsArray(first.frame),
+        fitBoundsOptions: { padding: fitPadding(fullscreenRef.current), maxZoom: FIT_MAX_ZOOM },
+        // The licence-required attribution is MapAttribution's line of text:
+        // an in-map control too printed "© MapTiler" twice.
         attributionControl: false,
+        // North stays up: the heat canvas is drawn for a flat, unrotated view.
+        dragRotate: false,
+        pitchWithRotate: false,
+        touchPitch: false,
+        maxPitch: 0,
       });
-      // Bottom-left, out of the floating buttons' column on the right, with a
-      // short custom credit so it can't spill a long cut-off string over them.
-      map.addControl(
-        new mgl.AttributionControl({ compact: true, customAttribution: "© MapTiler · OSM" }),
-        "bottom-left",
-      );
+      map.touchZoomRotate.disableRotation();
+      map.keyboard.disableRotation();
       mapRef.current = map;
-      mglRef.current = mgl;
+      // Cheaper glass over the canvas while it moves.
+      watchMapMoving(map);
 
-      map.on("load", () => {
+      const swapTheme = () => {
+        dark = isDark();
+        accent = readAccent();
+        styleLoadedRef.current = false;
+        removeRunLayers(map);
+        map.setStyle(heatBasemapStyle(maptilerStyle(dark, token), dark), { diff: false });
+      };
+
+      // iOS draws its app switcher snapshots in both appearances: a flip back
+      // while this style loaded went unseen, so the theme is checked again.
+      map.on("style.load", () => {
         if (cancelled) return;
-
-        const style = map.getStyle() as StyleSpecification & {
-          layers: { id: string; type: string }[];
-        };
-        const firstSymbolId = style.layers.find((l) => l.type === "symbol")?.id;
-
-        const { data: heat, maxCount } = buildHeatGeoJSON(routes, first.routeIndices);
-
-        map.addSource("heat", { type: "geojson", data: heat });
-
-        // Intensity layer: color + width driven by how often each stretch was run.
-        map.addLayer(
-          {
-            id: "heat-line",
-            type: "line",
-            source: "heat",
-            layout: { "line-join": "round", "line-cap": "round" },
-            paint: {
-              "line-color": heatColorExpression(maxCount) as never,
-              "line-width": heatWidthExpression(maxCount) as never,
-              "line-opacity": 0.85,
-            },
-          },
-          firstSymbolId,
-        );
-
+        addRunLayers(map);
+        styleLoadedRef.current = true;
         setMapReady(true);
+        if (isDark() !== dark) swapTheme();
       });
+
+      // Not map.isStyleLoaded(): it stays false while tiles load, long after style.load, and a flip then went unseen.
+      const observer = new MutationObserver(() => {
+        if (cancelled || !styleLoadedRef.current) return;
+        if (isDark() !== dark) {
+          swapTheme();
+        } else if (readAccent() !== accent) {
+          accent = readAccent();
+          addRunLayers(map);
+        }
+      });
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-accent"] });
+      stopObserving = () => observer.disconnect();
     }
 
-    initMap(document.documentElement.classList.contains("dark"));
-
-    const observer = new MutationObserver(() => {
-      if (!cancelled) initMap(document.documentElement.classList.contains("dark"));
-    });
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
+    let stopObserving: (() => void) | null = null;
+    initMap();
 
     return () => {
       cancelled = true;
-      observer.disconnect();
-      clearClusterMarkers();
+      stopObserving?.();
+      heatRef.current?.remove();
+      heatRef.current = null;
+      fenceCleanup?.();
+      drawnOverlayRef.current = null;
+      styleLoadedRef.current = false;
       mapRef.current?.remove();
       mapRef.current = null;
       setMapReady(false);
     };
-  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Keyed on `data` alone: the routes and clusters it reads all derive from it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
-  // Rebuild heat geometry (and rescale the ramp) whenever the filters change, or
-  // whenever more route geometry arrives from /api/map/routes - the zone a user
-  // lands on has no coordinates yet on first render (see GlobalMapClient), so this
-  // reruns again once its fetch resolves and `routes` gains those entries. The
-  // trace is revealed in steps rather than set all at once, so streets build up
-  // on screen instead of popping in.
   useEffect(() => {
-    const map = mapRef.current;
-    const source = map?.getSource("heat") as GeoJSONSource | undefined;
-    if (!mapReady || !map || !source) return;
-
-    const { data: heat, maxCount } = buildHeatGeoJSON(routes, visibleIndices);
-    if (map.getLayer("heat-line")) {
-      map.setPaintProperty("heat-line", "line-color", heatColorExpression(maxCount) as never);
-      map.setPaintProperty("heat-line", "line-width", heatWidthExpression(maxCount) as never);
-    }
-
-    const features = heat.features;
+    tracksRef.current = buildHeatTracks(routes, visibleIndices);
+    if (!mapReady) return;
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion || features.length === 0) {
-      source.setData(heat);
-      return;
-    }
-
-    let step = 0;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-    function reveal() {
-      step += 1;
-      const count = Math.ceil((features.length * step) / REVEAL_STEPS);
-      source!.setData({ type: "FeatureCollection", features: features.slice(0, count) });
-      if (step < REVEAL_STEPS) timeoutId = setTimeout(reveal, REVEAL_STEP_MS);
-    }
-    reveal();
-
-    return () => {
-      if (timeoutId !== null) clearTimeout(timeoutId);
-    };
+    heatRef.current?.setTracks(tracksRef.current, !reduceMotion);
   }, [visibleIndices, mapReady, routes]);
 
-  // Re-fits on the selected zone - but not while the world view owns the camera
-  // (see below), and it re-fires when world view turns off even if selectedIdx
-  // didn't change, so exiting world view via the toggle button (not a bubble tap)
-  // still returns the camera to the previously selected zone.
   useEffect(() => {
-    if (!mapReady || !mapRef.current || !selected || worldView) return;
-    mapRef.current.fitBounds(
-      [
-        [selected.bounds.minLon, selected.bounds.minLat],
-        [selected.bounds.maxLon, selected.bounds.maxLat],
-      ],
-      { padding: 60, maxZoom: 14, duration: 800 },
-    );
-  }, [selectedIdx, mapReady, worldView]); // eslint-disable-line react-hooks/exhaustive-deps
+    ringRef.current = ring;
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    const { ring: ringLine, dot } = ringData(ring);
+    (map.getSource(RING_SOURCE) as GeoJSONSource | undefined)?.setData(ringLine);
+    (map.getSource(DOT_SOURCE) as GeoJSONSource | undefined)?.setData(dot);
+  }, [ring, mapReady]);
 
-  // World view: swap the per-zone heat trace for one bubble per zone (sized by its
-  // route count under the current filters), and fit the camera to all of them at
-  // once. Tapping a bubble hands control back to the caller (onSelectCluster),
-  // which flips worldView off and lets the effect above zoom back in.
+  // During a theme swap, the next style.load draws whichever overlay is
+  // current then.
   useEffect(() => {
     const map = mapRef.current;
-    const mgl = mglRef.current;
-    if (!mapReady || !map || !mgl) return;
+    if (!mapReady || !map || !styleLoadedRef.current) return;
+    if (drawnOverlayRef.current === (overlay ?? null)) return;
+    eraseOverlay(drawnOverlayRef.current, map);
+    drawnOverlayRef.current = null;
+    if (overlay && drawOverlay(overlay, map)) drawnOverlayRef.current = overlay;
+  }, [overlay, mapReady]);
 
-    if (map.getLayer("heat-line")) {
-      map.setLayoutProperty("heat-line", "visibility", worldView ? "none" : "visible");
+  // Keyed on the frame's numbers, so a routes array rebuilt unchanged doesn't
+  // move the camera.
+  const fittedOnce = useRef(false);
+  useEffect(() => {
+    if (!mapReady) {
+      fittedOnce.current = false;
+      return;
     }
-
-    clearClusterMarkers();
-
-    if (worldView) {
-      const isDark = document.documentElement.classList.contains("dark");
-      const maxCount = Math.max(1, ...clusterCounts);
-      let bounds: InstanceType<typeof mgl.LngLatBounds> | null = null;
-
-      // Add markers smallest-first so busier zones stack on top instead of being buried under one-off bubbles.
-      const zOrder = clusters.map((_, i) => i).sort((a, b) => (clusterCounts[a] ?? 0) - (clusterCounts[b] ?? 0));
-
-      for (const i of zOrder) {
-        const c = clusters[i];
-        const count = clusterCounts[i] ?? 0;
-        if (!c || count <= 0) continue;
-
-        const radius = clusterBubbleRadius(count, maxCount);
-        const name = clusterNames[i] ?? "";
-        const label = `${name} · ${count}`.trim();
-        const el = mkClusterMarker(count, radius, name, label, isDark);
-        el.addEventListener("click", () => onSelectClusterRef.current(i));
-        el.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onSelectClusterRef.current(i);
-          }
-        });
-
-        const marker = new mgl.Marker({ element: el }).setLngLat(c.center).addTo(map);
-        clusterMarkersRef.current.push(marker);
-
-        const cb: [[number, number], [number, number]] = [
-          [c.bounds.minLon, c.bounds.minLat],
-          [c.bounds.maxLon, c.bounds.maxLat],
-        ];
-        bounds = bounds ? bounds.extend(cb) : new mgl.LngLatBounds(cb[0], cb[1]);
-      }
-
-      if (bounds) {
-        map.fitBounds(bounds, { padding: 70, maxZoom: 11, duration: 800 });
-      }
-    }
-  }, [worldView, mapReady, clusters, clusterCounts, clusterNames]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!mapRef.current || !fitTarget) return;
+    // The box may just have gone fullscreen or back.
+    mapRef.current.resize();
+    mapRef.current.fitBounds(boundsArray(fitTarget), {
+      padding: (fitOverride && fitOverridePadding) || fitPadding(fullscreen),
+      maxZoom: FIT_MAX_ZOOM,
+      duration: fittedOnce.current ? FIT_MS : 0,
+    });
+    fittedOnce.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitKey, mapReady, fullscreen]);
 
   const resize = useCallback(() => {
     mapRef.current?.resize();
   }, []);
 
-  return { containerRef, resize };
+  return { containerRef, resize, mapRef, mapReady };
 }

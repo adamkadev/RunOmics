@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { activeNavHref, findOrigin, sectionLabel } from '../navigation'
-import { t } from '@/i18n'
+import { activeNavHref, findOrigin } from '../navigation'
 
 const SIDEBAR = ['/', '/activities', '/plan', '/analytics', '/map', '/profile', '/settings']
 const TAB_BAR = ['/', '/activities', '/plan', '/analytics', '/profile']
@@ -14,10 +13,11 @@ describe('activeNavHref', () => {
   it('keeps the section lit on detail pages', () => {
     expect(activeNavHref('/activities/12345', SIDEBAR)).toBe('/activities')
     expect(activeNavHref('/shoes/abc', TAB_BAR)).toBe('/profile')
+    expect(activeNavHref('/consistency', TAB_BAR)).toBe('/profile')
   })
 
   it('folds the Progress sub-pages into Progress in both navs', () => {
-    for (const path of ['/shoes', '/records', '/goals', '/athlete', '/milestones']) {
+    for (const path of ['/shoes', '/records', '/goals', '/athlete']) {
       expect(activeNavHref(path, SIDEBAR)).toBe('/profile')
       expect(activeNavHref(path, TAB_BAR)).toBe('/profile')
     }
@@ -62,14 +62,3 @@ describe('findOrigin', () => {
   })
 })
 
-describe('sectionLabel', () => {
-  it('names the section a path belongs to', () => {
-    expect(sectionLabel('/records')).toBe(t.pages.records.title)
-    expect(sectionLabel('/activities/123')).toBe(t.nav.items.activities)
-    expect(sectionLabel('/')).toBe(t.nav.items.dashboard)
-  })
-
-  it('returns nothing for a path no section owns', () => {
-    expect(sectionLabel('/login')).toBeNull()
-  })
-})

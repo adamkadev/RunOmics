@@ -1,19 +1,26 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Activity, PlannedWorkout } from '@/domain/activity/types'
+import type { CoachingPlan } from '@/domain/coaching/types'
+import { plan, workout as prescription } from '@/domain/coaching/__tests__/fixtures'
 import { runVerdictInsightHash } from '@/domain/ai/runVerdictInsight'
 
-const { getAllActivities, getAllPlannedWorkouts, readVerifiedInsight, getCachedInsightsByPrefix } = vi.hoisted(() => ({
+const { getAllActivities, getAllPlannedWorkouts, readVerifiedInsight, coaching } = vi.hoisted(() => ({
   getAllActivities: vi.fn(),
   getAllPlannedWorkouts: vi.fn(),
   readVerifiedInsight: vi.fn(),
-  getCachedInsightsByPrefix: vi.fn(),
+  coaching: { getCurrentPlan: vi.fn(), getArchivedPlans: vi.fn() },
 }))
 
 vi.mock('@/infrastructure/repositories/JsonActivityRepository', () => ({ getAllActivities }))
+vi.mock('@/infrastructure/repositories/JsonCoachingRepository', () => ({
+  JsonCoachingRepository: vi.fn(function JsonCoachingRepository() {
+    return coaching
+  }),
+}))
 vi.mock('@/infrastructure/repositories/JsonPlannedWorkoutRepository', () => ({ getAllPlannedWorkouts }))
 vi.mock('@/infrastructure/repositories/FirestoreInsightsRepository', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/infrastructure/repositories/FirestoreInsightsRepository')>()
-  return { ...actual, readVerifiedInsight, getCachedInsightsByPrefix }
+  return { ...actual, readVerifiedInsight }
 })
 
 const { getRunVerdictContexts, getRunVerdictInsight } = await import('../GetRunVerdictInsight')
@@ -48,9 +55,11 @@ const workout = (date: string, name = 'Threshold 3x8'): PlannedWorkout => ({
   durationSecs: 2700,
 })
 
-function withHistory(activities: Activity[], planned: PlannedWorkout[] = []) {
+function withHistory(activities: Activity[], planned: PlannedWorkout[] = [], plans: { current?: CoachingPlan | null; archived?: CoachingPlan[] } = {}) {
   getAllActivities.mockReturnValue(activities)
   getAllPlannedWorkouts.mockReturnValue(planned)
+  coaching.getCurrentPlan.mockReturnValue(plans.current ?? null)
+  coaching.getArchivedPlans.mockReturnValue(plans.archived ?? [])
 }
 
 describe('getRunVerdictContexts', () => {
@@ -103,6 +112,30 @@ describe('getRunVerdictContexts', () => {
     expect(getRunVerdictContexts()[0]?.history.daysSinceLastRun).toBe(2)
   })
 
+  it("attaches what the coaching plan wrote the session for, from an archived plan when it has been replaced", () => {
+    const current = plan({ id: 'current', weeks: [] })
+    const archived = plan({ id: 'archived', status: 'superseded' })
+    withHistory([activity('a', '2026-09-09'), activity('b', '2026-09-08')], [], { current, archived: [archived] })
+
+    const [planned, unplanned] = getRunVerdictContexts()
+    expect(planned?.intent).toEqual({ title: prescription().title, description: prescription().description, weekFocus: 'Threshold introduction' })
+    expect(unplanned?.intent).toBeNull()
+    expect(coaching.getCurrentPlan).toHaveBeenCalledTimes(1)
+    expect(coaching.getArchivedPlans).toHaveBeenCalledTimes(1)
+  })
+
+  it('still builds every context when a plan file cannot be read', () => {
+    withHistory([activity('a', '2026-09-09')])
+    coaching.getCurrentPlan.mockImplementation(() => {
+      throw new Error('current_plan.json: weeks must be an array')
+    })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(getRunVerdictContexts()[0]?.intent).toBeNull()
+    expect(error).toHaveBeenCalled()
+    error.mockRestore()
+  })
+
   it('nothing to build from an athlete with no runs yet', () => {
     withHistory([])
 
@@ -120,19 +153,6 @@ describe('getRunVerdictInsight', () => {
     readVerifiedInsight.mockResolvedValue(INSIGHT)
 
     expect(await getRunVerdictInsight(activity('a', '2026-07-20'))).toEqual(INSIGHT)
-  })
-
-  it('null when the cached verdict has gone stale, so the card keeps its rules-based copy', async () => {
-    readVerifiedInsight.mockResolvedValue(null)
-
-    expect(await getRunVerdictInsight(activity('a', '2026-07-20'))).toBeNull()
-  })
-
-  it('gives each run its own document', async () => {
-    readVerifiedInsight.mockResolvedValue(null)
-    await getRunVerdictInsight(activity('a', '2026-07-20'))
-
-    expect(readVerifiedInsight).toHaveBeenCalledWith('runVerdict_a', expect.any(String))
   })
 
   it('keys the verdict on the run and the history behind it', async () => {
@@ -153,62 +173,33 @@ describe('getRunVerdictInsight', () => {
   })
 })
 
-// generateStaticParams pre-renders one page per run in the same build process,
-// so this is the one path that has to survive hundreds of calls without hitting
-// Firestore hundreds of times - see getRunVerdictInsight's isProductionBuild
-// branch. Reimports the module fresh each time so the build-lifetime cache
-// inside it doesn't leak between cases.
-describe('getRunVerdictInsight during a production build', () => {
-  const PROJECT_ID = 'runomics-test'
-
+describe('getRunVerdictInsight read cost', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.resetModules()
-    withHistory([activity('a', '2026-07-20'), activity('b', '2026-07-18')])
+    withHistory([activity('a', '2026-07-20'), activity('b', '2026-07-18'), activity('c', '2026-07-15')])
+    readVerifiedInsight.mockResolvedValue(null)
+  })
+
+  it('costs one read per run rendered, not one per run stored', async () => {
+    for (const id of ['a', 'b', 'c']) await getRunVerdictInsight(activity(id, '2026-07-20'))
+
+    expect(readVerifiedInsight).toHaveBeenCalledTimes(3)
+    expect(readVerifiedInsight.mock.calls.map((call) => call[0])).toEqual([
+      'runVerdict_a',
+      'runVerdict_b',
+      'runVerdict_c',
+    ])
+  })
+
+  it('takes the same direct path during a production build', async () => {
     process.env.NEXT_PHASE = 'phase-production-build'
-    process.env.FIREBASE_PROJECT_ID = PROJECT_ID
-  })
+    try {
+      const fresh = await import('../GetRunVerdictInsight')
+      await fresh.getRunVerdictInsight(activity('a', '2026-07-20'))
 
-  afterEach(() => {
-    delete process.env.NEXT_PHASE
-    delete process.env.FIREBASE_PROJECT_ID
-  })
-
-  it('fetches every run verdict once and reuses it for the rest of the build', async () => {
-    const fresh = await import('../GetRunVerdictInsight')
-    const hash = runVerdictInsightHash(fresh.getRunVerdictContexts()[0]!)
-    getCachedInsightsByPrefix.mockResolvedValue(new Map([['runVerdict_a', { ...INSIGHT, hash }]]))
-
-    await fresh.getRunVerdictInsight(activity('a', '2026-07-20'))
-    await fresh.getRunVerdictInsight(activity('b', '2026-07-18'))
-
-    expect(getCachedInsightsByPrefix).toHaveBeenCalledTimes(1)
-    expect(readVerifiedInsight).not.toHaveBeenCalled()
-  })
-
-  it('serves the cached verdict for the run it belongs to', async () => {
-    const fresh = await import('../GetRunVerdictInsight')
-    const hash = runVerdictInsightHash(fresh.getRunVerdictContexts()[0]!)
-    getCachedInsightsByPrefix.mockResolvedValue(new Map([['runVerdict_a', { ...INSIGHT, hash }]]))
-
-    expect(await fresh.getRunVerdictInsight(activity('a', '2026-07-20'))).toEqual(INSIGHT)
-    expect(await fresh.getRunVerdictInsight(activity('b', '2026-07-18'))).toBeNull()
-  })
-
-  it('falls back quietly when the batch fetch fails', async () => {
-    getCachedInsightsByPrefix.mockRejectedValue(new Error('unreachable'))
-
-    const fresh = await import('../GetRunVerdictInsight')
-
-    expect(await fresh.getRunVerdictInsight(activity('a', '2026-07-20'))).toBeNull()
-  })
-
-  it('never touches Firestore without admin credentials', async () => {
-    delete process.env.FIREBASE_PROJECT_ID
-
-    const fresh = await import('../GetRunVerdictInsight')
-
-    expect(await fresh.getRunVerdictInsight(activity('a', '2026-07-20'))).toBeNull()
-    expect(getCachedInsightsByPrefix).not.toHaveBeenCalled()
+      expect(readVerifiedInsight).toHaveBeenCalledWith('runVerdict_a', expect.any(String))
+    } finally {
+      delete process.env.NEXT_PHASE
+    }
   })
 })

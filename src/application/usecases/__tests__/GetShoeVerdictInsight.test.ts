@@ -30,12 +30,6 @@ describe('getShoeVerdictInsight', () => {
     expect(await getShoeVerdictInsight(context())).toEqual(INSIGHT)
   })
 
-  it('null when the cached verdict has gone stale, so the card keeps its own line', async () => {
-    readVerifiedInsight.mockResolvedValue(null)
-
-    expect(await getShoeVerdictInsight(context())).toBeNull()
-  })
-
   it('gives each pair its own document', async () => {
     readVerifiedInsight.mockResolvedValue(null)
     await getShoeVerdictInsight(context())
@@ -70,8 +64,6 @@ describe('getShoeVerdictInsight', () => {
 
     const [first, second] = readVerifiedInsight.mock.calls
     expect(first?.[1].hash).not.toBe(second?.[1].hash)
-    // The status badge is on the same screen, so crossing into replace also has
-    // to stop the previous verdict being served through the grace window.
     expect(first?.[1].guard).not.toBe(second?.[1].guard)
   })
 

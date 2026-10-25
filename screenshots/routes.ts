@@ -1,61 +1,44 @@
 import { ACCENT_IDS, DEFAULT_ACCENT, type AccentId } from '@/lib/accent'
 
-/**
- * Screenshot manifest: every screen the audit tool walks.
- *
- * `path`   - URL to visit (dynamic segments use IDs from the generated dataset,
- *            so the pages render fully without a live Firestore).
- * `name`   - slug used for the output folder
- *            (screenshots/output/<accent>/<theme>/<name>).
- * `hasTabs`- true when the screen has an in-page tab bar (role="tab"). Only
- *            Analytics and Calendar do today; the capture walks each tab and
- *            shoots begin/middle/end for it. Everything else is a single scroll.
- * `waitFor`- optional selector to await before shooting, when the default
- *            "first heading is visible" heuristic isn't enough.
- */
 export interface RouteSpec {
   path: string
   name: string
   hasTabs?: boolean
   waitFor?: string
+  /** A detail page, opened from the first link on `path` starting with this, so it has content in any dataset. */
+  firstLinkTo?: string
+  asOwner?: boolean
+  /** Waited for, not required, before shooting: a mark set once something slow is done. */
+  settledWhen?: string
 }
-
-// IDs from the generated demo dataset (scripts/generate_demo_data.mjs), so the
-// detail pages prerender with content instead of a 404. Point these at your own
-// data/activities/<YYYY-MM>.json and data/shoes.json when auditing a real deployment.
-const SAMPLE_ACTIVITY_ID = '90000256'
-const SAMPLE_SHOE_ID = 'demo-shoe-0000000000000001'
 
 export const ROUTES: RouteSpec[] = [
   { path: '/', name: 'dashboard' },
   { path: '/activities', name: 'activities' },
-  { path: `/activities/${SAMPLE_ACTIVITY_ID}`, name: 'activity-detail' },
-  { path: '/calendar', name: 'calendar', hasTabs: true },
+  { path: '/activities', name: 'activity-detail', firstLinkTo: '/activities/', hasTabs: true, settledWhen: '[data-route-drawn]' },
+  { path: '/plan', name: 'plan', hasTabs: true },
   { path: '/analytics', name: 'analytics', hasTabs: true },
   { path: '/map', name: 'map' },
   { path: '/goals', name: 'goals' },
   { path: '/records', name: 'records', hasTabs: true },
   { path: '/shoes', name: 'shoes' },
-  { path: `/shoes/${SAMPLE_SHOE_ID}`, name: 'shoe-detail' },
+  { path: '/shoes', name: 'shoe-detail', firstLinkTo: '/shoes/' },
   { path: '/profile', name: 'profile' },
+  { path: '/athlete', name: 'athlete' },
+  { path: '/consistency', name: 'consistency' },
+  { path: '/all-time', name: 'all-time' },
   { path: '/settings', name: 'settings' },
+  { path: '/settings', name: 'settings-owner', asOwner: true },
+  { path: '/no-such-page', name: 'not-found' },
 ]
 
 export const THEMES = ['light', 'dark'] as const
 export type Theme = (typeof THEMES)[number]
 
-// The accent palettes come straight from the app so a new one is captured the
-// moment it ships - there is no second list to keep in sync here.
 export const ACCENTS = ACCENT_IDS
 export const DEFAULT_ACCENT_ID = DEFAULT_ACCENT
 export type Accent = AccentId
 
-/**
- * Which themes/accents a run walks. Both default to the shipped-out-of-the-box
- * look (all themes, the default accent) because the full matrix is 6x the work;
- * override with `SCREENSHOT_THEMES` / `SCREENSHOT_ACCENTS`, each taking `all`
- * or a comma-separated list.
- */
 function select<T extends string>(env: string | undefined, all: readonly T[], fallback: readonly T[]): T[] {
   const raw = env?.trim()
   if (!raw) return [...fallback]

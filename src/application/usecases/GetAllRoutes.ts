@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
-import type { ActivityType } from '@/domain/activity/types'
+import type { Activity, ActivityType } from '@/domain/activity/types'
 import { distanceKm } from '@/lib/math'
+import { percentileBounds, type LngLatBounds } from '@/lib/routeFrame'
+import { simplifyTrack } from '@/lib/simplifyTrack'
 
 export interface RouteMeta {
   id: string
@@ -16,16 +19,15 @@ export interface RouteCluster {
   id: string
   routeCount: number
   totalKm: number
-  // Actual centroid of all route bounding-box centres in this cluster
   center: [number, number]
-  bounds: { minLon: number; maxLon: number; minLat: number; maxLat: number }
+  /** The centre of the run closest to all the others: the mean `center` of separate spots can land on a village with no run in it. */
+  labelPoint: [number, number]
+  bounds: LngLatBounds
+  /** What the map opens on: the 4th to 96th percentile of the area's points, where `bounds` holds them all. */
+  frame: LngLatBounds
   routeIndices: number[]
 }
 
-// Everything the /map page needs to render its shell (zone list, world-view
-// bubbles, filters) WITHOUT any GPS coordinates - safe to ship on first load
-// regardless of dataset size. Route geometry is fetched separately, per zone,
-// via /api/map/routes (see MapRoutesForCluster below).
 export interface MapShellData {
   routeMeta: RouteMeta[]
   clusters: RouteCluster[]
@@ -39,10 +41,21 @@ export interface AllRoutesData extends MapShellData {
   routes: [number, number][][]
 }
 
-// Two cluster centers closer than this are considered the same place. Far enough to
-// keep an entire city's runs together, close enough to split two neighbouring towns
-// that a fixed lon/lat grid cell would otherwise merge.
 const CLUSTER_RADIUS_KM = 12
+
+export function medoid(points: [number, number][]): [number, number] {
+  let best = points[0]!
+  let bestSum = Infinity
+  for (const p of points) {
+    let sum = 0
+    for (const q of points) sum += distanceKm(p[0], p[1], q[0], q[1])
+    if (sum < bestSum) {
+      bestSum = sum
+      best = p
+    }
+  }
+  return best
+}
 
 function findNearestClusterIdx(
   lon: number,
@@ -61,16 +74,14 @@ function findNearestClusterIdx(
   return nearestIdx
 }
 
-// Clustering runs over every activity's full GPS trace - cache it per server
-// process (mirrors JsonActivityRepository's own cache) so /api/map/routes
-// doesn't redo this work on every single zone request.
-let cache: AllRoutesData | null = null
+// Keyed by the activity list itself, which stays the same array until the data changes.
+let cache: { source: Activity[]; routes: AllRoutesData } | null = null
 
 export function getAllRoutes(): AllRoutesData {
-  if (cache) return cache
+  const source = getAllActivities()
+  if (cache?.source === source) return cache.routes
 
-  // getAllActivities returns newest-first; keep that order so index 0 = most recent run
-  const activities = getAllActivities().filter((a) => a.route && a.route.length > 1)
+  const activities = source.filter((a) => a.route && a.route.length > 1)
 
   type ClusterAcc = {
     indices: number[]
@@ -79,10 +90,10 @@ export function getAllRoutes(): AllRoutesData {
     km: number
     sumCLon: number; sumCLat: number
     center: [number, number]
+    runCenters: [number, number][]
   }
 
   const acc: ClusterAcc[] = []
-  let mostRecentClusterIdx = -1
 
   activities.forEach((a, idx) => {
     const coords = a.route!
@@ -97,7 +108,7 @@ export function getAllRoutes(): AllRoutesData {
       ? nearestIdx
       : acc.push({
         indices: [], minLon: Infinity, maxLon: -Infinity, minLat: Infinity, maxLat: -Infinity,
-        km: 0, sumCLon: 0, sumCLat: 0, center: [cLon, cLat],
+        km: 0, sumCLon: 0, sumCLat: 0, center: [cLon, cLat], runCenters: [],
       }) - 1
 
     const g = acc[clusterIdx]
@@ -110,28 +121,30 @@ export function getAllRoutes(): AllRoutesData {
     g.km += a.distanceKm
     g.sumCLon += cLon
     g.sumCLat += cLat
+    g.runCenters.push([cLon, cLat])
     g.center = [g.sumCLon / g.indices.length, g.sumCLat / g.indices.length]
 
-    if (idx === 0) mostRecentClusterIdx = clusterIdx
   })
 
-  const unsorted: RouteCluster[] = acc.map((g, i) => ({
-    id: `${i}`,
-    routeCount: g.indices.length,
-    totalKm: Math.round(g.km),
-    center: g.center,
-    bounds: { minLon: g.minLon, maxLon: g.maxLon, minLat: g.minLat, maxLat: g.maxLat },
-    routeIndices: g.indices,
-  }))
+  const unsorted: RouteCluster[] = acc.map((g, i) => {
+    const bounds = { minLon: g.minLon, maxLon: g.maxLon, minLat: g.minLat, maxLat: g.maxLat }
+    return {
+      id: `${i}`,
+      routeCount: g.indices.length,
+      totalKm: Math.round(g.km),
+      center: g.center,
+      labelPoint: medoid(g.runCenters),
+      bounds,
+      frame: percentileBounds(g.indices.map((idx) => activities[idx]!.route!)) ?? bounds,
+      routeIndices: g.indices,
+    }
+  })
 
-  const mostRecentId = mostRecentClusterIdx !== -1 ? `${mostRecentClusterIdx}` : null
-  const clusters = unsorted.sort((a, b) => b.routeCount - a.routeCount)
+  // By km, the share basis the page uses: the busiest area comes first and the page opens on it.
+  const clusters = unsorted.sort((a, b) => b.totalKm - a.totalKm || b.routeCount - a.routeCount)
+  const defaultClusterIdx = 0
 
-  const defaultClusterIdx = mostRecentId
-    ? Math.max(0, clusters.findIndex((c) => c.id === mostRecentId))
-    : 0
-
-  cache = {
+  const routes: AllRoutesData = {
     routes: activities.map((a) => a.route!),
     routeMeta: activities.map((a) => ({
       id: a.id,
@@ -148,13 +161,48 @@ export function getAllRoutes(): AllRoutesData {
     totalKm: Math.round(activities.reduce((s, a) => s + a.distanceKm, 0)),
     years: Array.from(new Set(activities.map((a) => a.date.slice(0, 4)))).sort(),
   }
-  return cache
+  cache = { source, routes }
+  return routes
 }
 
-// For the initial /map page load: same clustering/metadata as getAllRoutes(), minus
-// the GPS coordinate arrays (which can be tens of MB across a multi-year dataset).
-// Route geometry is fetched on demand, per zone, once the user actually looks at one.
 export function getMapShellData(): MapShellData {
   const { routeMeta, clusters, defaultClusterIdx, totalCount, totalKm, years } = getAllRoutes()
   return { routeMeta, clusters, defaultClusterIdx, totalCount, totalKm, years }
 }
+
+/** Finer than a heatmap stroke shows; Districts coverage reads the full tracks, which this would shift. */
+export const DRAWN_TOLERANCE_M = 3
+
+/** Bump when an answer's shape or the drawn tracks change: a browser keeps an answer by its version for good. */
+const MAP_FORMAT = 1
+
+const derived = new WeakMap<AllRoutesData, { version?: string; drawn: ([number, number][] | undefined)[] }>()
+
+function derivedOf(data: AllRoutesData) {
+  let entry = derived.get(data)
+  if (!entry) derived.set(data, (entry = { drawn: [] }))
+  return entry
+}
+
+/** Changes with any run or track the map serves, so a request naming it may be cached for good. */
+export function getMapVersion(): string {
+  const data = getAllRoutes()
+  const entry = derivedOf(data)
+  if (!entry.version) {
+    const { routes, ...shell } = data
+    const hash = createHash('sha256').update(JSON.stringify(shell))
+    for (const route of routes) hash.update(Float64Array.from(route.flat()))
+    entry.version = `${MAP_FORMAT}.${hash.digest('base64url').slice(0, 16)}`
+  }
+  return entry.version
+}
+
+/** What the map draws of a route: within DRAWN_TOLERANCE_M of the track recorded, about a fifth of its points. */
+export function getDrawnRoute(routeIdx: number): [number, number][] | undefined {
+  const data = getAllRoutes()
+  const { drawn } = derivedOf(data)
+  const route = data.routes[routeIdx]
+  if (route && !drawn[routeIdx]) drawn[routeIdx] = simplifyTrack(route, DRAWN_TOLERANCE_M)
+  return drawn[routeIdx]
+}
+

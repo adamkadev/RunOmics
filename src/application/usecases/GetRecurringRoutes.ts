@@ -1,7 +1,7 @@
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { routeCells, routeOutline, overlap, type Coord } from '@/domain/activity/routeShape'
 import type { Activity } from '@/domain/activity/types'
-import { round } from '@/lib/math'
+import { distanceKm, round } from '@/lib/math'
 
 export interface RouteRun {
   activityId: string
@@ -11,24 +11,57 @@ export interface RouteRun {
 
 export interface RecurringRoute {
   id: string
+  /** Routes are named by place: the runs' own titles name the session, not the route. */
+  start: Coord | null
+  /** Its point furthest from the start, which names the route: every route from home shares its start street. */
+  far: Coord | null
+  /** A loop, an out-and-back that retraces itself, or a run that ends elsewhere. */
+  shape: RouteShape
   runCount: number
   distanceKm: number
-  /** SVG path in a 100x100 box, for the thumbnail. */
   outline: string
-  /** Every pass, oldest first, so the pace over time can be read as a series. */
   runs: RouteRun[]
   bestPaceSecPerKm: number
   bestActivityId: string
   bestDate: string
 }
 
-// Same ground, allowing for an extra loop at the end.
+export type RouteShape = 'loop' | 'out-back' | 'point'
+
+const POINT_TO_POINT_KM = 0.4
+/** Halves that share this much of their ground retrace each other. */
+const RETRACE_OVERLAP = 0.6
+
+export function farthestPoint(route: readonly Coord[]): Coord | null {
+  const start = route[0]
+  if (!start) return null
+  let far = start
+  let farKm = 0
+  for (const point of route) {
+    const km = distanceKm(start[0], start[1], point[0], point[1])
+    if (km > farKm) {
+      far = point
+      farKm = km
+    }
+  }
+  return far
+}
+
+export function routeShape(route: readonly Coord[]): RouteShape {
+  const start = route[0]
+  const end = route[route.length - 1]
+  if (!start || !end) return 'loop'
+  if (distanceKm(start[0], start[1], end[0], end[1]) > POINT_TO_POINT_KM) return 'point'
+  const half = Math.floor(route.length / 2)
+  const out = routeCells(route.slice(0, half))
+  const back = routeCells(route.slice(half))
+  return overlap(out, back) >= RETRACE_OVERLAP ? 'out-back' : 'loop'
+}
+
 const MIN_OVERLAP = 0.7
 
-// Two runs of the same route rarely differ by more than a corner cut.
 const MAX_DISTANCE_DRIFT = 0.15
 
-// Below three passes there is no trend to read, only two runs side by side.
 const MIN_RUNS = 3
 
 interface Cluster {
@@ -62,11 +95,15 @@ function toRecurringRoute(cluster: Cluster, index: number): RecurringRoute | nul
 
   const best = timed.reduce((fastest, a) => (a.paceSecPerKm! < fastest.paceSecPerKm! ? a : fastest), latest)
 
+  const route = latest.route as Coord[]
   return {
     id: `${index}`,
+    start: route[0] ?? null,
+    far: farthestPoint(route),
+    shape: routeShape(route),
     runCount: timed.length,
     distanceKm: round(timed.reduce((sum, a) => sum + a.distanceKm, 0) / timed.length, 1),
-    outline: routeOutline(latest.route as Coord[]),
+    outline: routeOutline(route),
     runs: [...timed].reverse().map((a) => ({
       activityId: a.id,
       date: a.date.slice(0, 10),
@@ -78,25 +115,17 @@ function toRecurringRoute(cluster: Cluster, index: number): RecurringRoute | nul
   }
 }
 
-// Clustering compares every trace against every cluster, so cache it per server
-// process the way getAllRoutes does.
-let cache: RecurringRoute[] | null = null
+let cache: { source: Activity[]; routes: RecurringRoute[] } | null = null
 
-/**
- * Routes run at least three times, with how the pace on them has moved. Same
- * ground means same hills and same distance, which is the only setting where
- * comparing raw pace across months says something about the runner.
- */
 export function getRecurringRoutes(): RecurringRoute[] {
-  if (cache) return cache
+  const source = getAllActivities()
+  if (cache?.source === source) return cache.routes
 
-  // Newest first, so every cluster's first run is its most recent one.
-  const withRoutes = getAllActivities().filter((a) => a.route && a.route.length > 1)
-
-  cache = clusterByRoute(withRoutes)
+  const routes = clusterByRoute(source.filter((a) => a.route && a.route.length > 1))
     .map(toRecurringRoute)
     .filter((route): route is RecurringRoute => route !== null)
     .sort((a, b) => b.runCount - a.runCount || a.distanceKm - b.distanceKm)
 
-  return cache
+  cache = { source, routes }
+  return routes
 }

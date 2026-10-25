@@ -1,6 +1,6 @@
-import fs from 'fs'
 import { dataPath } from '../dataPath'
-import type { GoalYear } from '@/application/usecases/GetGoalsData'
+import { readJsonFile } from '../readJsonFile'
+import type { GoalYear } from '@/domain/goals/types'
 import { parseTimeInput } from '@/lib/formatters'
 
 interface RawGoalTarget {
@@ -15,13 +15,9 @@ interface RawGoalYear {
 }
 
 export function getGoalYears(): GoalYear[] {
-  const filePath = dataPath('goals.json')
-  if (!fs.existsSync(filePath)) return []
+  const { years } = readJsonFile<{ years?: RawGoalYear[] }>(dataPath('goals.json'), {})
 
-  const raw = fs.readFileSync(filePath, 'utf-8')
-  const years = (JSON.parse(raw) as { years: RawGoalYear[] }).years
-
-  return years.map((year) => ({
+  return (years ?? []).map((year) => ({
     year: year.year,
     annualDistanceKm: year.annualDistanceKm,
     targets: year.targets.map((target) => ({

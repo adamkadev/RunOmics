@@ -1,13 +1,18 @@
 'use client'
 
 import { useState } from 'react'
+import dynamic from 'next/dynamic'
 import { Share } from 'lucide-react'
-import type { Activity } from '@/domain/activity/types'
-import { ShareCardModal } from './ShareCardModal'
+import type { ShareActivity } from '@/lib/shareCardStats'
+import { GLASS_GROUP_BUTTON } from '@/components/ui/GlassSurface'
 import { t } from '@/i18n'
 
+// Loaded on the first tap: the modal brings the canvas renderer and the map
+// snapshot code with it.
+const ShareCardModal = dynamic(() => import('./ShareCardModal').then((m) => m.ShareCardModal), { ssr: false })
+
 interface Props {
-  activity: Activity
+  activity: ShareActivity
 }
 
 export function ShareButton({ activity }: Props) {
@@ -21,12 +26,16 @@ export function ShareButton({ activity }: Props) {
 
   return (
     <>
+      {/* Once the hero has scrolled away, the compact title bar's share icon
+          presses this button (data-bar-action). */}
       <button
-        onClick={() => setIsOpen(true)}
+        type="button"
+        data-bar-action="share"
         aria-label={t.activity.share}
-        className="glass-chip inline-flex shrink-0 items-center justify-center rounded-full p-2 text-foreground transition-transform active:scale-95 active:opacity-80"
+        onClick={() => setIsOpen(true)}
+        className={GLASS_GROUP_BUTTON}
       >
-        <Share size={16} />
+        <Share size={18} strokeWidth={2} aria-hidden="true" />
       </button>
 
       {isOpen && (

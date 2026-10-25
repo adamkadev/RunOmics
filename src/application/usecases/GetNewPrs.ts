@@ -10,8 +10,11 @@ export interface NewPr {
   date: string
 }
 
-// Returns [] on the very first call (nothing to compare against yet) - it just bootstraps the stored state.
-export async function getNewPrs(): Promise<NewPr[]> {
+/**
+ * Nothing is stored until `commit()`: commit once the pushes are out, so a
+ * failed push is offered again next run.
+ */
+export async function getNewPrs(): Promise<{ newPrs: NewPr[]; commit: () => Promise<void> }> {
   const activities = getAllActivities()
   const computed = computeBestEfforts(activities)
   const lastState = await getLastPrState()
@@ -32,6 +35,5 @@ export async function getNewPrs(): Promise<NewPr[]> {
     }
   }
 
-  await saveLastPrState(nextState)
-  return newPrs
+  return { newPrs, commit: () => saveLastPrState(nextState) }
 }

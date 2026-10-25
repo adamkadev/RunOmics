@@ -66,7 +66,7 @@ class TestWeatherClientBatching:
         client = WeatherClient(fetch=fetch, today=date(2026, 7, 30))
         client.snapshot(10.10, 20.50, "2026-07-29T07:00")
         client.snapshot(10.10, 20.50, "2026-06-29T07:00")
-        client.snapshot(30.29, 40.37, "2026-07-29T07:00")
+        client.snapshot(43.29, 5.37, "2026-07-29T07:00")
 
         assert len(calls) == 3
 

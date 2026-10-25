@@ -1,46 +1,27 @@
-"""Sync Garmin's own training status and load balance.
+"""Garmin's `weekly` and `monthly` status reports name the view, not the granularity (one record per day / per week).
 
-Three metrics-service endpoints, all keyed by device:
-
-  trainingstatus/weekly/{profileUuid}   one record per day  (the 4-week view)
-  trainingstatus/monthly/{profileUuid}  one record per week (the 6-month view)
-  trainingloadbalance/latest/{date}     a rolling 4-week snapshot, today only
-
-The two status reports are the ones Garmin Connect's own training status view
-reads, over an arbitrary range and in the same record shape - `weekly` and
-`monthly` name the view, not the granularity. Both series are stored: the
-weekly rollup is not the days voted on, it is Garmin's reading at each week's
-close, and re-deriving it locally reproduced 18 of 25 weeks.
-
-Each record carries what RunOmics would otherwise re-derive by hand - an acute
-/ chronic load ratio computed on Firstbeat load rather than on kilometres, and
-the watch's own status phrase. The load balance carries what RunOmics cannot
-derive at all - Garmin's personalised target range per intensity bucket.
-
-Only the status is backfilled. The balance is a 4-week aggregate whose targets
-move slowly, so a daily snapshot of the current values is enough and halves the
-request count.
+The weekly rollup is stored rather than re-derived, because voting on the days does not reproduce Garmin's week
+boundary or its choice of sample.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any
 
+from data_directory import get_data_dir
 from .client import GarminAPIError, GarminClient
 from .retry import retry_transient
+from repository.history_file import read_history, write_history
 
-_DATA_DIR = Path(__file__).parent.parent.parent / "public" / "data"
+_DATA_DIR = get_data_dir()
 _STATUS_PATH = _DATA_DIR / "training_status.json"
 _BALANCE_PATH = _DATA_DIR / "training_load_balance.json"
 
 _RATE_LIMIT_PAUSE = 1.0
-# Days already stored that we re-fetch anyway: Garmin revises the most recent
-# ones as later activities land.
+# Stored days re-fetched anyway: Garmin revises the most recent ones as later activities land.
 _REFRESH_WINDOW_DAYS = 7
 # Garmin's own front-end never asks the daily report for more than four weeks,
 # nor the weekly one for more than six months.
@@ -49,13 +30,7 @@ _WEEKLY_WINDOW_DAYS = 182
 
 
 def _primary_device(by_device: Any) -> dict[str, Any] | None:
-    """The entry for the primary training device.
-
-    Garmin keys these payloads by device id. Falling back to the first entry
-    would silently mix two watches' series together.
-    TODO: on a watch change, key the stored days by device id so the switch is
-    visible instead of appearing as a discontinuity in one series.
-    """
+    """TODO: on a watch change, key the stored days by device id so the switch is not a discontinuity in one series."""
     if not isinstance(by_device, dict):
         return None
 
@@ -67,7 +42,6 @@ def _primary_device(by_device: Any) -> dict[str, Any] | None:
 
 
 def _primary_device_series(report_data: Any) -> list[dict[str, Any]]:
-    """The daily records of the primary training device, in report order."""
     if not isinstance(report_data, dict):
         return []
 
@@ -83,11 +57,7 @@ def _primary_device_series(report_data: Any) -> list[dict[str, Any]]:
 
 
 def _status_label(phrase: Any) -> str | None:
-    """`RECOVERY_2` -> `recovery`.
-
-    The numeric `trainingStatus` code is undocumented, but the feedback phrase
-    is stable and self-describing: a status name plus a variant number.
-    """
+    """`RECOVERY_2` -> `recovery`: the numeric `trainingStatus` code is undocumented, the phrase is stable."""
     if not isinstance(phrase, str) or not phrase:
         return None
     return re.sub(r"_\d+$", "", phrase).lower()
@@ -98,7 +68,6 @@ def _load(value: Any) -> int | None:
 
 
 def _flatten_day(entry: dict[str, Any]) -> dict[str, Any] | None:
-    """Flatten one day's record, or None when the watch recorded nothing."""
     acute = entry.get("acuteTrainingLoadDTO") or {}
     day = {
         "status": _status_label(entry.get("trainingStatusFeedbackPhrase")),
@@ -113,8 +82,7 @@ def _flatten_day(entry: dict[str, Any]) -> dict[str, Any] | None:
         "chronicLoadMax": _load(acute.get("maxTrainingLoadChronic")),
     }
 
-    # A day with no load and no status is a day the watch was not worn; storing
-    # it would pad the series with holes that look like real zeroes.
+    # A day with no load and no status is a day the watch was not worn, not a real zero.
     if day["status"] is None and day["acuteLoad"] is None:
         return None
 
@@ -122,7 +90,6 @@ def _flatten_day(entry: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def normalize_status_report(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """One range response flattened into stored days, keyed by calendar date."""
     days: dict[str, dict[str, Any]] = {}
 
     for entry in _primary_device_series(payload.get("reportData")):
@@ -160,17 +127,11 @@ def normalize_load_balance(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _load_stored() -> tuple[dict[str, Any], dict[str, Any]]:
-    if not _STATUS_PATH.exists():
-        return {}, {}
-    try:
-        stored = json.loads(_STATUS_PATH.read_text())
-    except Exception:
-        return {}, {}
+    stored = read_history(_STATUS_PATH)
     return stored.get("days") or {}, stored.get("weeks") or {}
 
 
 def dates_to_fetch(start: date, today: date, stored: dict[str, Any]) -> list[date]:
-    """Every day from `start` that we have not stored, plus a trailing refresh window."""
     refresh_from = today - timedelta(days=_REFRESH_WINDOW_DAYS)
     days: list[date] = []
     current = start
@@ -182,11 +143,7 @@ def dates_to_fetch(start: date, today: date, stored: dict[str, Any]) -> list[dat
 
 
 def fetch_windows(days: list[date]) -> list[tuple[date, date]]:
-    """The days worth fetching grouped into ranges of at most `_WINDOW_DAYS`.
-
-    A range costs one request whatever it spans, so days already stored inside
-    one ride along for free - and fill any gap Garmin has since backfilled.
-    """
+    """A range costs one request whatever it spans, so stored days inside one ride along for free."""
     windows: list[tuple[date, date]] = []
 
     for day in days:
@@ -200,11 +157,7 @@ def fetch_windows(days: list[date]) -> list[tuple[date, date]]:
 
 
 def weekly_windows(start: date, today: date, stored: dict[str, Any]) -> list[tuple[date, date]]:
-    """The span still worth asking the weekly report for, split into 6-month windows.
-
-    Only the tail is re-fetched once a history exists: Garmin revises the week
-    in progress as sessions land, but closed weeks never move again.
-    """
+    """Garmin revises the week in progress as sessions land, but closed weeks never move, so only the tail is re-fetched."""
     latest = max(stored) if stored else None
     first = (
         max(start, date.fromisoformat(latest) - timedelta(days=_REFRESH_WINDOW_DAYS))
@@ -228,9 +181,7 @@ def _fetch_days(client: GarminClient, windows: list[tuple[date, date]]) -> dict[
     for window_start, window_end in windows:
         try:
             payload = retry_transient(
-                lambda: client.get_training_status_daily(
-                    window_start.isoformat(), window_end.isoformat()
-                )
+                client.get_training_status_daily, window_start.isoformat(), window_end.isoformat()
             )
         except GarminAPIError as exc:
             print(f"  Warning: training status {window_start}…{window_end} failed: {exc}")
@@ -248,9 +199,7 @@ def _fetch_weeks(client: GarminClient, windows: list[tuple[date, date]]) -> dict
     for window_start, window_end in windows:
         try:
             payload = retry_transient(
-                lambda: client.get_training_status_weekly(
-                    window_start.isoformat(), window_end.isoformat()
-                )
+                client.get_training_status_weekly, window_start.isoformat(), window_end.isoformat()
             )
         except GarminAPIError as exc:
             print(f"  Warning: weekly training status {window_start}…{window_end} failed: {exc}")
@@ -263,15 +212,6 @@ def _fetch_weeks(client: GarminClient, windows: list[tuple[date, date]]) -> dict
 
 
 def sync_training_status(client: GarminClient, start: date, today: date | None = None) -> int:
-    """Backfill training_status.json with Garmin's daily and weekly series.
-
-    Returns the day count stored. The first run walks the whole history four
-    weeks per request; every run after that covers new days and the refresh
-    window in a single one. The weekly series is Garmin's own rollup, stored
-    rather than re-derived from the days: its week boundary and its choice of
-    sample within the week are Garmin's, and voting on the days does not
-    reproduce them.
-    """
     today = today or date.today()
     stored_days, stored_weeks = _load_stored()
 
@@ -285,14 +225,7 @@ def sync_training_status(client: GarminClient, start: date, today: date | None =
     days = {**stored_days, **fetched_days}
     weeks = {**stored_weeks, **fetched_weeks}
 
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _STATUS_PATH.write_text(
-        json.dumps(
-            {"days": dict(sorted(days.items())), "weeks": dict(sorted(weeks.items()))},
-            indent=2,
-        )
-        + "\n"
-    )
+    write_history(_STATUS_PATH, {"days": dict(sorted(days.items())), "weeks": dict(sorted(weeks.items()))})
     print(
         f"  {len(fetched_days)} day(s) and {len(fetched_weeks)} week(s) recorded, "
         f"{len(days)} day(s) total."
@@ -301,7 +234,6 @@ def sync_training_status(client: GarminClient, start: date, today: date | None =
 
 
 def sync_load_balance(client: GarminClient, today: date | None = None) -> bool:
-    """Snapshot today's intensity balance. Returns True when it was written."""
     iso = (today or date.today()).isoformat()
     print("Syncing training load balance…")
     try:
@@ -315,7 +247,6 @@ def sync_load_balance(client: GarminClient, today: date | None = None) -> bool:
         print("  No load balance recorded for today.")
         return False
 
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _BALANCE_PATH.write_text(json.dumps(balance, indent=2, sort_keys=True) + "\n")
+    write_history(_BALANCE_PATH, dict(sorted(balance.items())))
     print(f"  {balance.get('feedback', 'written')}")
     return True

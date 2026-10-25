@@ -1,62 +1,48 @@
-'use client'
+import { cn } from '@/lib/utils'
+import { EYEBROW_CLASS } from '@/components/ui/SectionLabel'
+import { Stat, StatGrid } from '@/components/ui/Stat'
+import { Button } from '@/components/ui/Button'
 
-import { useEffect, useState } from 'react'
-import type { MapTerritory } from '@/application/usecases/GetMapTerritory'
-import { GlassSurface } from '@/components/ui/GlassSurface'
-import { reverseGeocode } from '@/lib/reverseGeocode'
-import { t } from '@/i18n'
-
-// The accent-text token drops to a dark 600 tone in light mode; on this always-
-// dark hero surface it needs the on-dark value, held in both modes.
-const ACCENT_ON_DARK = 'var(--accent-on-dark)'
-
-interface Props {
-  territory: MapTerritory
+interface TerritoryStat {
+  label: string
+  value: string
+  unit?: string
 }
 
-export function TerritoryBand({ territory }: Props) {
-  const s = t.pages.map.territory
-  const [place, setPlace] = useState<string | null>(null)
+export interface TerritoryCardContent {
+  eyebrow: string
+  headline: { lead: string; accent: string; tail: string }
+  stats: TerritoryStat[]
+  action?: { label: string; onClick: () => void }
+  /** Holds two lines while the headline loads, so the card neither shrinks nor grows back. */
+  pending?: boolean
+}
 
-  useEffect(() => {
-    const token = process.env.NEXT_PUBLIC_MAPTILER_TOKEN
-    if (!token) return
-    let cancelled = false
-    reverseGeocode(territory.center[0], territory.center[1], token).then((name) => {
-      if (!cancelled) setPlace(name)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [territory.center])
-
+export function TerritoryBand({ eyebrow, headline, stats, action, pending }: TerritoryCardContent) {
   return (
-    <GlassSurface variant="hero" className="flex flex-col gap-3.5">
-      {/* variant="hero" paints --hero-gradient: deep in light, a subtle tint in
-          dark - a dark surface in both modes. So its text uses white / --accent-
-          on-dark, never text-foreground (which is dark in light and vanishes
-          here) - same rule as TodayHero and ProfileHero. */}
-      <div>
-        <p className="font-mono text-micro font-bold uppercase tracking-[0.1em]" style={{ color: ACCENT_ON_DARK }}>
-          {s.eyebrow}
-        </p>
-        <p className="mt-2 font-display text-base font-bold leading-snug text-white">
-          {s.headline(territory.percentVolume, territory.medianRadiusKm)}
-          {place && <span style={{ color: ACCENT_ON_DARK }}> {s.aroundPlace(place)}</span>}
+    <section
+      className="flex flex-col gap-3.5 content-card rounded-[24px] bg-card shadow-[var(--card-edge)] p-4"
+      data-testid="territory-card"
+      aria-busy={pending || undefined}
+    >
+      <div className="flex flex-col gap-1.5">
+        <p className={cn(EYEBROW_CLASS, 'text-muted-foreground')}>{eyebrow}</p>
+        <p className={cn('text-base font-medium leading-snug text-foreground [text-wrap:pretty]', pending && 'min-h-[2lh]')}>
+          {headline.lead}
+          <span className="text-accent-text">{headline.accent}</span>
+          {headline.tail}
         </p>
       </div>
-      <div className="flex gap-6">
-        <div>
-          <div className="font-display text-lg font-bold tabular-nums text-white">{territory.routeCount}</div>
-          <div className="text-micro text-white/60">{s.routesStat}</div>
-        </div>
-        <div>
-          <div className="font-display text-lg font-bold tabular-nums text-white">
-            {territory.medianRadiusKm} {t.units.km}
-          </div>
-          <div className="text-micro text-white/60">{s.radiusStat}</div>
-        </div>
-      </div>
-    </GlassSurface>
+      <StatGrid columns={stats.length} className="border-t border-border pt-3.5">
+        {stats.map((stat) => (
+          <Stat key={stat.label} label={stat.label} value={stat.value} unit={stat.unit} valueStyle={{ fontSize: 24 }} />
+        ))}
+      </StatGrid>
+      {action && (
+        <Button size="lg" className="w-full" onClick={action.onClick}>
+          {action.label}
+        </Button>
+      )}
+    </section>
   )
 }

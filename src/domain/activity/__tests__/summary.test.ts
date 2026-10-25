@@ -26,7 +26,7 @@ const activity = {
   avgHeartRate: 148,
   rpe: 4,
   hrZones: [{ zone: 2, seconds: 1800, percent: 60, minBpm: 120, maxBpm: 140 }],
-  route: [[-150.0, 0.0], [-149.9, 0.1]],
+  route: [[6.1, 49.6], [6.2, 49.7]],
   polyline: 'abc',
   paceSamples: [300, 295],
   hrSamples: [140, 150],
@@ -49,8 +49,8 @@ describe('toActivitySummary', () => {
       durationSeconds: 3000,
       paceSecPerKm: 294,
       avgHeartRate: 148,
-      rpe: 4,
-      hrZones: activity.hrZones,
+      routeThumb: expect.any(String),
+      zones: [0, 1800],
     })
   })
 

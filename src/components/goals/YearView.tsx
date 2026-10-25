@@ -2,183 +2,141 @@
 
 import Link from 'next/link'
 import { Trophy, ArrowRight, Calendar } from 'lucide-react'
-import type { YearData, GoalProjection } from '@/application/usecases/GetGoalsData'
-import { formatDuration, formatDate, formatPace } from '@/lib/formatters'
-import { GlassSurface } from '@/components/ui/GlassSurface'
-import { AnimatedValue } from '@/components/ui/AnimatedValue'
+import { EYEBROW_CLASS, SectionDivider } from '@/components/ui/SectionLabel'
+import { cardClass } from '@/components/ui/Card'
+import type { YearData } from '@/application/usecases/GetGoalsData'
+import { formatDuration, formatDate, formatKm, formatPace } from '@/lib/formatters'
+import { Unit } from '@/components/ui/Stat'
 import { MonthlyVolumeChart } from './MonthlyVolumeChart'
-import { SeasonTimeline } from './SeasonTimeline'
-import { raceDistanceTint } from '@/lib/colors'
-import { STATUS } from '@/lib/statusColors'
-import { cn } from '@/lib/utils'
+import { SeasonTimeline, type SeasonBlock } from './SeasonTimeline'
+import { shortDist } from './shortDistance'
 import { t } from '@/i18n'
+import { OutcomePill } from './OutcomePill'
+import { cn } from '@/lib/utils'
 
-const DIST_SHORT: Record<string, string> = { 'Half-Marathon': 'HM' }
-export function shortDist(d: string) { return DIST_SHORT[d] ?? d }
-
-// Text-only status indicator for the annual-goal header (no chip background,
-// no icon): green ahead, blue on track, amber behind.
-const PROJECTION_STATUS_CLASS: Record<GoalProjection['status'], string> = {
-  ahead:    STATUS.success.text,
-  on_track: STATUS.progress.text,
-  behind:   STATUS.warning.text,
-}
-
-// Two-segment trend line for the annual-goal hero: solid from Jan 1 to today's
-// actual progress, dashed from today to the year-end projection. Purely
-// presentational - the underlying numbers all come from computeProjection.
-// Runs edge-to-edge (x: 0-300) so the card's full width is used.
-function projectionSparkline(year: number, annualDistanceKm: number, annualProgress: number, projection: GoalProjection) {
-  const yearStart = new Date(year, 0, 1).getTime()
-  const yearEnd = new Date(year + 1, 0, 1).getTime()
-  const elapsedFraction = Math.min(Math.max((Date.now() - yearStart) / (yearEnd - yearStart), 0), 1)
-  const projectedPercent = (projection.projectedYearKm / annualDistanceKm) * 100
-  const domainMax = Math.max(100, projectedPercent) * 1.08
-  const yFor = (pct: number) => 40 - (Math.min(Math.max(pct, 0), domainMax) / domainMax) * 34
-  return { nowX: elapsedFraction * 300, nowY: yFor(annualProgress), endY: yFor(projectedPercent) }
-}
+const TITLE = 'text-[15px] font-semibold text-foreground'
 
 interface Props {
   yearData: YearData
+  today: string
+  block?: SeasonBlock | null
 }
 
-export function YearView({ yearData }: Props) {
+export function YearView({ yearData, today, block = null }: Props) {
   const { goals, pbs, upcomingRaces, totalDistanceKm, projection, monthlyGoals } = yearData
+  const p = t.goals.projection
 
   const annualDistanceKm = goals?.annualDistanceKm ?? 0
   const annualProgress = annualDistanceKm > 0
     ? Math.min((totalDistanceKm / annualDistanceKm) * 100, 100)
     : 0
-  const sparkline = projection && annualDistanceKm > 0
-    ? projectionSparkline(yearData.year, annualDistanceKm, annualProgress, projection)
+  const projectedPercent = projection && annualDistanceKm > 0
+    ? Math.min((projection.projectedYearKm / annualDistanceKm) * 100, 100)
     : null
-  const hasRaceDistanceCards = !!goals && (goals.targets.length > 0 || upcomingRaces.length > 0)
+  // deltaKm arrives absolute and `status` can be on track above the goal, so the sign comes from the projection.
+  const signedDeltaKm = projection ? projection.projectedYearKm - annualDistanceKm : 0
+  const projectionColor = signedDeltaKm < 0 ? 'var(--warn)' : 'var(--pos)'
+  const verdict = signedDeltaKm < 0
+    ? p.shortAtPace(formatKm(Math.abs(signedDeltaKm)))
+    : signedDeltaKm > 0
+      ? p.overAtPace(formatKm(signedDeltaKm))
+      : p.onPace
+  const reachedByKm = annualDistanceKm > 0 && totalDistanceKm >= annualDistanceKm ? Math.round(totalDistanceKm - annualDistanceKm) : null
+  const hasRaceDistanceCards = (goals?.targets.length ?? 0) > 0 || upcomingRaces.length > 0
+  // A year not yet started has nothing to show against its goal.
+  const notStarted = yearData.year > Number(today.slice(0, 4)) && totalDistanceKm === 0
+  const leftKm = annualDistanceKm > 0 && reachedByKm === null ? Math.round(annualDistanceKm - totalDistanceKm) : null
+  const yearOver = yearData.year < Number(today.slice(0, 4))
+  const leftLine = leftKm === null ? null : yearOver ? p.finalShort(formatKm(leftKm)) : p.toGo(formatKm(leftKm))
 
   return (
-    <div className="space-y-8">
-      {goals && (
-        <section className="space-y-3">
-          <GlassSurface variant="card" className="p-5">
-            <div className="mb-3 flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                {t.goals.annualGoal}
-              </h2>
-              {projection && (
-                <span className={cn('shrink-0 text-xs font-semibold', PROJECTION_STATUS_CLASS[projection.status])}>
-                  {t.goals.projection.status[projection.status]}
-                  {projection.deltaKm !== 0 && ` ${projection.status === 'ahead' ? '+' : '-'}${Math.abs(projection.deltaKm)} km`}
-                </span>
-              )}
-            </div>
-            <div className="mb-3 flex items-end justify-between">
-              <div>
-                <span className="text-3xl font-bold tracking-tight text-foreground">
-                  <AnimatedValue value={totalDistanceKm} />
-                </span>
-                <span className="ml-1 text-sm text-subtle">
-                  {'/ '}{annualDistanceKm}{' '}{t.units.km}
-                </span>
-              </div>
-              <span className="text-sm font-semibold text-accent-text">
-                <AnimatedValue value={annualProgress} />%
-              </span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-foreground/[0.08]">
-              <div
-                className="h-full rounded-full transition-all"
-                style={{
-                  width: `${annualProgress}%`,
-                  background: 'linear-gradient(90deg, var(--accent), var(--accent-text))',
-                }}
+    <div className="flex flex-col gap-3.5">
+      {goals && !notStarted && (
+        <section className={cardClass({ className: 'flex flex-col gap-3' })} data-testid="goal-card">
+          <h2 className={cn(EYEBROW_CLASS, 'text-muted-foreground')}>{t.goals.distanceGoal}</h2>
+          <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="text-[38px] font-bold leading-none tracking-[-0.03em] text-foreground">
+              {/* No count-up: a frame mid-way would read 1,040 of a 1,116 year beside "+116 km". */}
+              {formatKm(totalDistanceKm)}
+            </span>
+            <span className="text-[15px] text-[var(--text-2)]">{t.goals.ofKm(formatKm(annualDistanceKm))}</span>
+            {reachedByKm !== null && <OutcomePill tone="pos" className="self-center">{t.goals.reached(formatKm(reachedByKm))}</OutcomePill>}
+          </p>
+          <div className="relative h-2 rounded-full bg-[var(--surface-2)]">
+            <div className="h-full rounded-full bg-accent" data-testid="goal-fill" style={{ width: `${annualProgress}%` }} />
+            {projectedPercent !== null && projection && (
+              <span
+                role="img"
+                aria-label={p.projected(formatKm(projection.projectedYearKm))}
+                data-testid="goal-projection"
+                className="absolute -bottom-[5px] -top-[5px] w-0.5 -translate-x-1/2 rounded-full"
+                style={{ left: `${projectedPercent}%`, background: projectionColor }}
               />
-            </div>
-            {sparkline && projection && (
-              <>
-                <svg viewBox="0 0 300 44" preserveAspectRatio="none" className="mt-3 h-9 w-full">
-                  <path
-                    d={`M0 40 L${sparkline.nowX.toFixed(1)} ${sparkline.nowY.toFixed(1)}`}
-                    fill="none"
-                    stroke="var(--accent)"
-                    strokeWidth={2.5}
-                    strokeLinecap="round"
-                  />
-                  <path
-                    d={`M${sparkline.nowX.toFixed(1)} ${sparkline.nowY.toFixed(1)} L300 ${sparkline.endY.toFixed(1)}`}
-                    fill="none"
-                    className="text-subtle"
-                    stroke="currentColor"
-                    strokeWidth={1.5}
-                    strokeDasharray="4 4"
-                  />
-                </svg>
-                <p className="mt-1 text-caption text-subtle">
-                  {t.goals.projection.rate(projection.weeklyRate)} - {t.goals.projection.projected(projection.projectedYearKm)}
-                </p>
-              </>
             )}
-          </GlassSurface>
+          </div>
+          {(leftLine || projection) && (
+            <div className="flex justify-between gap-3 text-xs text-muted-foreground">
+              <span data-testid="goal-left">{leftLine}</span>
+              {projection && <span style={{ color: projectionColor }}>{p.projectedMark(formatKm(projection.projectedYearKm))}</span>}
+            </div>
+          )}
+          {projection && (
+            <p className="border-t border-border pt-2.5 text-[13px] leading-normal text-[var(--text-2)] text-pretty" data-testid="projection-line">
+              <b className="font-semibold" style={{ color: projectionColor }} data-testid="projection-verdict">{verdict}</b>{' '}
+              {(signedDeltaKm < 0 ? p.closes : p.needs)(formatKm(projection.weeklyNeeded), formatKm(projection.weeklyRate))}
+            </p>
+          )}
         </section>
       )}
 
-      {hasRaceDistanceCards && <SeasonTimeline yearData={yearData} />}
+      {hasRaceDistanceCards && <SeasonTimeline yearData={yearData} today={today} block={block} />}
 
-      {goals && monthlyGoals.length > 0 && <MonthlyVolumeChart monthlyGoals={monthlyGoals} />}
+      {goals && !notStarted && monthlyGoals.length > 0 && (
+        <MonthlyVolumeChart monthlyGoals={monthlyGoals} year={yearData.year} today={today} />
+      )}
 
       {!hasRaceDistanceCards && (
         pbs.length > 0 ? (
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          <section className="flex flex-col gap-2.5">
+            <SectionDivider as="h2" className="px-1">
               {t.goals.seasonRaces}
-            </h2>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            </SectionDivider>
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
               {pbs.map(({ entry, activity }) => {
-                const tint = raceDistanceTint(entry.distance)
                 return (
                   <Link
                     key={entry.activityId}
                     href={`/activities/${entry.activityId}`}
-                    className="glass-card group relative overflow-hidden rounded-card-sm transition-shadow hover:shadow-lg"
+                    className={cardClass({ className: 'group flex flex-col gap-1.5 transition-colors hover:border-[var(--line-2)]' })}
                   >
-                    <div className={cn('flex h-24 items-center bg-gradient-to-br to-transparent px-5', tint.overlay)}>
-                      <span className="text-3xl font-black text-foreground">
-                        {shortDist(entry.distance)}
-                      </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={TITLE}>{shortDist(entry.distance)}</span>
+                      <ArrowRight size={16} className="shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
                     </div>
-                    <div className="p-5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-xl font-bold tracking-tight text-foreground">
-                            {formatDuration(entry.seconds)}
-                          </p>
-                          {activity.paceSecPerKm && (
-                            <p className="text-sm text-muted-foreground">
-                              {formatPace(activity.paceSecPerKm)}
-                            </p>
-                          )}
-                        </div>
-                        <ArrowRight size={16} className="mt-1 shrink-0 text-subtle transition-colors group-hover:text-muted-foreground" />
-                      </div>
-                      <div className="mt-3 flex items-center gap-1.5 text-xs text-subtle">
-                        <Calendar size={12} className="shrink-0" />
-                        <span>{formatDate(activity.date)}</span>
-                        {activity.description && (
-                          <>
-                            <span className="text-subtle/40">·</span>
-                            <span className="truncate text-muted-foreground">{activity.description}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
+                    <p className="text-[26px] font-semibold leading-tight text-foreground">
+                      {formatDuration(entry.seconds)}
+                      {activity.paceSecPerKm && <Unit>{formatPace(activity.paceSecPerKm)}</Unit>}
+                    </p>
+                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Calendar size={12} className="shrink-0" aria-hidden />
+                      <span>{formatDate(activity.date)}</span>
+                      {activity.description && (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span className="truncate">{activity.description}</span>
+                        </>
+                      )}
+                    </p>
                   </Link>
                 )
               })}
             </div>
           </section>
         ) : (
-          <GlassSurface variant="card" className="rounded-card-sm border-dashed p-10 text-center">
-            <Trophy size={24} className="mx-auto mb-3 text-subtle" />
+          <section className={cardClass({ dashed: true, className: 'p-10 text-center' })}>
+            <Trophy size={24} className="mx-auto mb-3 text-subtle" aria-hidden />
             <p className="text-sm text-subtle">{t.goals.emptyPbs(yearData.year)}</p>
-          </GlassSurface>
+          </section>
         )
       )}
     </div>

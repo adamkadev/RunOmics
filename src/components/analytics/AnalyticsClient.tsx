@@ -1,43 +1,51 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
-import { cn } from '@/lib/utils'
-import type { AnalyticsPageData } from '@/application/usecases/GetAnalyticsData'
-import type { YearComparisonData } from '@/application/usecases/GetYearComparison'
-import type { SeasonHeadlineData } from '@/application/usecases/GetSeasonHeadline'
-import type { Insight } from '@/lib/gemini'
-import { SeasonHeadline } from '@/components/analytics/SeasonHeadline'
-import { TabInsight } from '@/components/analytics/TabInsight'
-import type { AnalyticsTabInsights } from '@/application/usecases/GetAnalyticsTabInsights'
-import { YearSelector } from '@/components/ui/YearSelector'
-import type { VO2maxSeries } from '@/application/usecases/GetVO2maxHistory'
-import type { TrainingLoadData } from '@/application/usecases/GetTrainingLoad'
-import type { LoadRiskPanel as LoadRiskPanelData } from '@/application/usecases/GetLoadRiskPanel'
+import type { WeeklyTrendPoint } from '@/application/usecases/GetAnalyticsData'
+import type { LoadRiskPanel } from '@/application/usecases/GetLoadRiskPanel'
 import type { LoadBalanceData } from '@/application/usecases/GetLoadBalance'
-import type { TrainingStatusHistory } from '@/application/usecases/GetTrainingStatusHistory'
-import type { GarminRacePredictionsData } from '@/application/usecases/GetGarminRacePredictions'
-import type { ThresholdHistoryData } from '@/application/usecases/GetThresholdHistory'
 import type { HeatImpactData } from '@/application/usecases/GetHeatImpact'
+import type { RunBests } from '@/domain/activity/paceCurve'
+import type { LoadPair } from '@/domain/training/loadTrend'
+import type { RecoveryDay } from '@/domain/training/recovery'
 import { ChartCardSkeleton } from '@/components/ui/Skeleton'
 import { useSwipeNavigation } from '@/lib/useSwipeNavigation'
+import { useToday } from '@/lib/useToday'
+import { StickyBar } from '@/components/ui/StickyBar'
+import { SegmentedTabs, useSegmentedTabs } from '@/components/ui/SegmentedTabs'
+import { formatDateRange } from '@/lib/formatters'
 import { t } from '@/i18n'
+import { PeriodControl } from './AnalyticsKit'
+import { CoachRead } from './CoachRead'
+import { tabRead } from './coachReadTabs'
+import {
+  LOAD_PERIODS,
+  WEEK_PERIODS,
+  dayWindow,
+  weekRows,
+  weekWindow,
+  type GoalRaceInput,
+  type LoadDay,
+  type LoadPeriod,
+  type PlanWeekInput,
+  type PredictionDay,
+  type StatusDay,
+  type WeekPeriod,
+  type YtdInput,
+} from './analyticsView'
 
-// Each tab panel is code-split so the analytics page only parses/hydrates the
-// charts of the visible tab (~20 Recharts components across all tabs).
 const tabLoading = () => (
-  <div className="space-y-4">
+  <div className="flex flex-col gap-5">
     <ChartCardSkeleton />
     <ChartCardSkeleton />
   </div>
 )
-const FitnessGroup = dynamic(() => import('./FitnessGroup').then((m) => m.FitnessGroup), { loading: tabLoading })
-const PerformanceGroup = dynamic(() => import('./PerformanceGroup').then((m) => m.PerformanceGroup), { loading: tabLoading })
-const VolumeGroup = dynamic(() => import('./VolumeGroup').then((m) => m.VolumeGroup), { loading: tabLoading })
-const HealthGroup = dynamic(() => import('./HealthGroup').then((m) => m.HealthGroup), { loading: tabLoading })
+const LoadTab = dynamic(() => import('./LoadTab').then((m) => m.LoadTab), { loading: tabLoading })
+const PerformanceTab = dynamic(() => import('./PerformanceTab').then((m) => m.PerformanceTab), { loading: tabLoading })
+const VolumeTab = dynamic(() => import('./VolumeTab').then((m) => m.VolumeTab), { loading: tabLoading })
+const IntensityTab = dynamic(() => import('./IntensityTab').then((m) => m.IntensityTab), { loading: tabLoading })
 
-// The four data-type tabs (Performance/Volume/Physiology/Seasons) become four
-// meaning groups: what question is this chart set answering?
 const TABS = [
   { id: 'fitness', label: t.analytics.tabs.fitness },
   { id: 'performance', label: t.analytics.tabs.performance },
@@ -47,247 +55,159 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id']
 
-// Season scope for the headline stats and the Volume group's comparison charts.
-// The per-metric trend charts are not governed by this - each one pages through
-// its own 4w/6m/1y window (see WindowedChartCard).
-type View = { kind: 'year'; year: number } | { kind: 'all' }
-
-const VIEW_STORAGE_KEY = 'analytics:view'
-
-function readStoredView(years: number[]): View | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const raw = localStorage.getItem(VIEW_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<View>
-    if (parsed.kind === 'year' && typeof parsed.year === 'number' && years.includes(parsed.year)) {
-      return { kind: 'year', year: parsed.year }
-    }
-    if (parsed.kind === 'all') return { kind: 'all' }
-  } catch {
-    // Malformed/absent storage - fall back to the default view.
-  }
-  return null
+/** Everything the four tabs draw from, raw: each tab windows it itself. */
+export interface AnalyticsBoardData {
+  load: LoadDay[]
+  status: StatusDay[]
+  risk: LoadRiskPanel | null
+  /** Garmin's acute/chronic pair per day. */
+  loads: LoadPair[]
+  /** Daily resting HR; empty until the recovery sync has run. */
+  recovery: RecoveryDay[]
+  weeks: WeeklyTrendPoint[]
+  plan: PlanWeekInput[]
+  /** Days whose planned session was missed, by Plan's own day states. */
+  missed: string[]
+  vo2max: { value: number | null; samples: { date: string; vo2max: number }[] }
+  threshold: { date: string; pace: number }[]
+  /** The watch's threshold heart rate, revised with its threshold pace. */
+  lthr: { date: string; bpm: number }[]
+  predictions: PredictionDay[]
+  race: GoalRaceInput | null
+  heat: HeatImpactData | null
+  /** The watch's load focus, absent on a watch without it. */
+  balance: LoadBalanceData | null
+  /** Each run's duration bests, oldest first; empty until the runs are reprocessed. */
+  paceBests: RunBests[]
+  ytd: YtdInput | null
+  /** The app's one weekly average: the last 12 complete weeks. */
+  weeklyAvgKm: number | null
 }
 
-export function AnalyticsClient({
-  data,
-  comparison,
-  seasonHeadline,
-  seasonInsight,
-  tabInsights,
-  vo2maxHistory,
-  trainingLoad,
-  loadRisk,
-  loadBalance,
-  statusHistory,
-  racePredictions,
-  threshold,
-  vo2maxTopPercent,
-  activeDays,
-  heatImpact,
-}: {
-  data: AnalyticsPageData
-  comparison: YearComparisonData | null
-  seasonHeadline: SeasonHeadlineData | null
-  seasonInsight: Insight | null
-  tabInsights: AnalyticsTabInsights
-  vo2maxHistory: VO2maxSeries
-  trainingLoad: TrainingLoadData | null
-  loadRisk: LoadRiskPanelData | null
-  loadBalance: LoadBalanceData | null
-  statusHistory: TrainingStatusHistory | null
-  racePredictions: GarminRacePredictionsData | null
-  threshold: ThresholdHistoryData | null
-  vo2maxTopPercent: number | null
-  activeDays: number
-  heatImpact: HeatImpactData | null
-}) {
-  const { years, byYear } = data
+interface TabWindow<P> {
+  period: P
+  offset: number
+}
 
-  const [view, setView] = useState<View>({ kind: 'year', year: years[0] ?? new Date().getFullYear() })
+const DEFAULTS = {
+  fitness: { period: '4w', offset: 0 } as TabWindow<LoadPeriod>,
+  performance: { period: '12w', offset: 0 } as TabWindow<LoadPeriod>,
+  volume: { period: '12w', offset: 0 } as TabWindow<WeekPeriod>,
+  health: { period: '12w', offset: 0 } as TabWindow<WeekPeriod>,
+}
+
+export function AnalyticsClient({ data, today: serverToday }: { data: AnalyticsBoardData; today: string }) {
+  const today = useToday(serverToday)
   const [tab, setTab] = useState<TabId>('fitness')
-
-  // Restore after mount, not in the initializer, to avoid a hydration mismatch.
-  useEffect(() => {
-    const stored = readStoredView(years)
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore from localStorage after mount
-    if (stored) setView(stored)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(view))
-  }, [view])
-
+  const [windows, setWindows] = useState(DEFAULTS)
   const tabsRef = useRef<HTMLDivElement>(null)
 
   function selectTab(id: TabId) {
+    // Before the new tab paints: a page left even 1-2 pt down sets off iOS's scroll-edge blur over the large title.
+    if (window.scrollY !== 0) window.scrollTo({ top: 0, behavior: 'instant' })
     setTab(id)
-    // When switching tabs from deep in a long panel, bring the tab strip back
-    // up so the new panel starts from its top. Two rules keep this from ever
-    // nudging the page *downward* - the bug that made the view creep lower on
-    // each switch:
-    //  1. offsetTop (summed up the offsetParent chain) is the strip's stable
-    //     in-flow position; getBoundingClientRect().top reports the *pinned*
-    //     safe-area offset once the sticky strip is stuck, so `rect.top +
-    //     scrollY` overshot and drifted a little further down every time.
-    //  2. We only scroll when we're currently *below* that target, so switching
-    //     tabs while already at the top never yanks the header out of view.
-    const el = tabsRef.current
-    if (el) {
-      let docTop = 0
-      for (let n: HTMLElement | null = el; n; n = n.offsetParent as HTMLElement | null) docTop += n.offsetTop
-      const target = Math.max(docTop - 12, 0)
-      if (window.scrollY > target) window.scrollTo({ top: target, behavior: 'smooth' })
-    }
   }
 
-  const isAll = view.kind === 'all'
+  // A tab swap changes the page under the title without a scroll: have the
+  // compact bar re-read where it is.
+  useEffect(() => {
+    window.dispatchEvent(new Event('scroll'))
+  }, [tab])
 
-  const active = view.kind === 'year' ? byYear[view.year] : data.allTime
-
-  function selectAllTime() {
-    setView({ kind: 'all' })
-  }
-
-  function selectYear(y: number) {
-    setView({ kind: 'year', year: y })
-  }
-
-  // All four meaning groups are available in every view; the year selector only
-  // scopes the Volume group's season-over-season comparison.
-  const visibleTabs = TABS
-  const displayYear = view.kind === 'year' ? view.year : (years[0] ?? null)
+  const analyticsTabs = useSegmentedTabs({ ids: TABS.map((item) => item.id), value: tab, onChange: selectTab })
 
   function goPrevTab() {
-    const idx = visibleTabs.findIndex((tb) => tb.id === tab)
-    const prev = idx > 0 ? visibleTabs[idx - 1] : undefined
-    if (prev) selectTab(prev.id)
+    const idx = TABS.findIndex((tb) => tb.id === tab)
+    if (idx > 0) selectTab(TABS[idx - 1]!.id)
   }
-
   function goNextTab() {
-    const idx = visibleTabs.findIndex((tb) => tb.id === tab)
-    const next = idx >= 0 && idx < visibleTabs.length - 1 ? visibleTabs[idx + 1] : undefined
-    if (next) selectTab(next.id)
+    const idx = TABS.findIndex((tb) => tb.id === tab)
+    if (idx >= 0 && idx < TABS.length - 1) selectTab(TABS[idx + 1]!.id)
   }
-
   const swipeHandlers = useSwipeNavigation(goPrevTab, goNextTab)
 
-  return (
-    <div className="space-y-4">
-      {/* Title left, season scope right on one line. The year selector only
-          scopes the Volume group's season-over-season comparison (the per-metric
-          trend charts page through their own windows, and the headline is
-          all-time), so it's shown only on that tab - everywhere else it would be
-          an inert control. */}
-      <div className="flex items-center justify-between gap-3 px-1">
-        <h1 className="shrink-0 font-display text-title1 font-bold leading-[1.1] tracking-tight text-foreground">
-          {t.analytics.title}
-        </h1>
+  // The oldest date any chart has, so a swipe can't go back past the data.
+  const earliest = [data.load[0]?.date, data.weeks[0]?.date].filter((d): d is string => !!d).sort()[0] ?? today
+  const current = windows[tab]
+  const loadTab = tab === 'fitness' || tab === 'performance'
+  const days = loadTab ? dayWindow(today, current.period as LoadPeriod, current.offset) : null
+  const weeks = loadTab ? null : weekWindow(today, current.period as WeekPeriod, current.offset)
 
-        {tab === 'volume' && (
-          <YearSelector
-            years={years}
-            selected={isAll ? null : displayYear}
-            onSelect={(y) => (y === null ? selectAllTime() : selectYear(y))}
-            allTimeLabel={t.analytics.allTimeChip}
-            className="min-w-0 justify-end"
+  function shift(step: 1 | -1) {
+    setWindows((all) => {
+      const w = all[tab]
+      const next = w.offset + step
+      if (next < 0) return all
+      const start = loadTab ? dayWindow(today, w.period as LoadPeriod, next).end : weekWindow(today, w.period as WeekPeriod, next).end
+      if (start < earliest) return all
+      return { ...all, [tab]: { ...w, offset: next } }
+    })
+  }
+
+  function setPeriod(period: string) {
+    setWindows((all) => ({ ...all, [tab]: { period, offset: 0 } }))
+  }
+
+  const rows = weeks ? weekRows(data.weeks, data.plan, weeks, today) : []
+  const range = days ?? weeks!
+  // A year by its months: its days made the line too wide to sit beside the period control on a phone.
+  const rangeLabel = formatDateRange(range.start, range.live ? today : range.end, { year: 'always', precision: current.period === '1y' ? 'month' : 'day' })
+
+  // Each tab's own coach read over its own window, so a tab set to 4 weeks never reads "12 weeks".
+  const coach = useMemo(() => {
+    const live = loadTab ? dayWindow(today, current.period as LoadPeriod, current.offset) : weekWindow(today, current.period as WeekPeriod, current.offset)
+    const weekly = loadTab ? [] : weekRows(data.weeks, data.plan, live as ReturnType<typeof weekWindow>, today)
+    return tabRead({ tab, data, today, period: current.period as LoadPeriod, days: loadTab ? (live as ReturnType<typeof dayWindow>) : null, rows: weekly, live: live.live })
+  }, [data, today, tab, current, loadTab])
+  const coachEyebrow = t.analytics.cards.coachRead.eyebrow(t.analytics.cards.period.words[current.period]!, t.analytics.tabs[tab])
+
+  return (
+    <div className="flex flex-col gap-5">
+      <header className="mb-1.5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <h1 data-testid="analytics-title" className="text-display text-foreground">
+            {t.analytics.title}
+          </h1>
+          {/* The subtitle fades under the compact title bar, which sets its
+              opacity from the layout before this page hydrates. */}
+          <p className="truncate text-sm text-muted-foreground" data-testid="analytics-range">
+            {rangeLabel}
+          </p>
+        </div>
+        <PeriodControl periods={loadTab ? LOAD_PERIODS : WEEK_PERIODS} value={current.period} onChange={setPeriod} />
+      </header>
+
+      {/* Its 8 pt of padding is for when it sticks; at rest the tabs sit the
+          page's 14 pt from the header and the coach read. */}
+      <StickyBar ref={tabsRef} top="var(--sticky-top, var(--sticky-alone, max(var(--safe-top), 8px)))" className="-my-2">
+        <SegmentedTabs tabs={analyticsTabs} items={TABS} label={t.analytics.title} size="md" fill onAura />
+      </StickyBar>
+
+      {coach && <CoachRead read={coach} eyebrow={coachEyebrow} />}
+
+      <div {...analyticsTabs.panelProps} {...swipeHandlers}>
+        {tab === 'fitness' && days && (
+          <LoadTab window={days} period={current.period as LoadPeriod} onShift={shift} today={today} data={data} />
+        )}
+        {tab === 'performance' && days && (
+          <PerformanceTab
+            window={days}
+            period={current.period as LoadPeriod}
+            onShift={shift}
+            today={today}
+            weeks={data.weeks}
+            vo2max={data.vo2max}
+            threshold={data.threshold}
+            lthr={data.lthr}
+            predictions={data.predictions}
+            race={data.race}
+            heat={data.heat}
+            paceBests={data.paceBests}
           />
         )}
+        {tab === 'volume' && weeks && <VolumeTab rows={rows} live={weeks.live} onShift={shift} ytd={data.ytd} weeklyAvgKm={data.weeklyAvgKm} />}
+        {tab === 'health' && weeks && <IntensityTab rows={rows} live={weeks.live} onShift={shift} plan={data.plan} />}
       </div>
-
-      {/* Group nav sits right under the header, above the season headline -
-          it's the primary navigation for this screen, not a secondary control
-          buried below the stats. Four equal columns rather than a scroller, so
-          "Health" is never half-cropped at the right edge. */}
-      {active && (
-        <div
-          ref={tabsRef}
-          role="tablist"
-          aria-label={t.analytics.title}
-          // No fill and no bottom border - the bg-background/80 slab read as an
-          // opaque white band over the accent canvas. Just a backdrop blur so the
-          // charts scrolling under the pinned tabs stay legible; the canvas tint
-          // shows through untinted.
-          className="sticky top-[max(var(--safe-top),8px)] z-20 -mx-4 grid grid-cols-4 gap-1.5 px-4 py-2 backdrop-blur-xl sm:-mx-6 sm:px-6"
-        >
-          {visibleTabs.map((item) => (
-            <button
-              key={item.id}
-              role="tab"
-              aria-selected={tab === item.id}
-              onClick={() => selectTab(item.id)}
-              className={cn(
-                // px-1: the four tabs share one non-scrolling row, so the label
-                // gets the width instead of the chip's padding (320px screens).
-                'truncate rounded-full px-1 py-2 text-center text-footnote transition-all active:scale-95',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                tab === item.id
-                  ? 'border border-transparent bg-accent font-semibold text-accent-foreground shadow-sm'
-                  : 'border border-foreground/[0.12] bg-foreground/[0.06] font-medium text-foreground/60 hover:bg-foreground/[0.10] hover:text-foreground',
-              )}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* The season totals card used to sit here. Distance/time/sessions/
-          elevation/avg-per-week/calories are the "how far have I come" read,
-          so they live on Progress' This year card - Analytics answers "why am
-          I improving?" and opens straight on the headline + charts. */}
-      {seasonHeadline && <SeasonHeadline data={seasonHeadline} aiTake={seasonInsight} />}
-
-      {active && (
-        <>
-          <div {...swipeHandlers}>
-            {tabInsights[tab] && <TabInsight insight={tabInsights[tab]!} />}
-
-            {tab === 'fitness' && (
-              <FitnessGroup
-                trainingLoad={trainingLoad}
-                statusHistory={statusHistory}
-                loadRisk={loadRisk}
-                vo2maxHistory={vo2maxHistory}
-                vo2maxTopPercent={vo2maxTopPercent}
-                weeklyTrends={data.weeklyTrends}
-                threshold={threshold}
-                activeDays={activeDays}
-                racePredictions={racePredictions}
-              />
-            )}
-
-            {tab === 'performance' && (
-              <PerformanceGroup
-                weeklyTrends={data.weeklyTrends}
-                racePredictions={racePredictions}
-                heatImpact={heatImpact}
-              />
-            )}
-
-            {tab === 'volume' && (
-              <VolumeGroup
-                series={active}
-                weeklyTrends={data.weeklyTrends}
-                year={view.kind === 'year' ? view.year : null}
-                years={years}
-                byYear={byYear}
-                comparison={comparison}
-              />
-            )}
-
-            {tab === 'health' && (
-              <HealthGroup
-                weeklyTrends={data.weeklyTrends}
-                loadBalance={loadBalance}
-              />
-            )}
-          </div>
-        </>
-      )}
     </div>
   )
 }

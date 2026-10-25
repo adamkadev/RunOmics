@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 
 from garmin_fit_sdk import Decoder, Stream
 
+from processing.pace_profile import duration_bests, flat_equivalent
+
 _SEMICIRCLE_TO_DEG = 180.0 / 2**31
 _MAX_ROUTE_POINTS = 2000
 _FIT_EPOCH = datetime(1989, 12, 31)
@@ -26,6 +28,9 @@ _INTERVAL_SPLIT_TYPES = {
     "interval_recovery",
     "interval_cooldown",
 }
+
+_LAP_SPLIT_TYPE = "lap"
+_MIN_LAP_SPLITS = 2
 
 
 @dataclass
@@ -60,7 +65,7 @@ class ActivitySplit:
             "distanceM": round(self.distance_m, 1),
             "avgSpeedMs": round(self.avg_speed_ms, 4),
             "avgHr": self.avg_hr,
-            "laps": [l.to_dict() for l in self.laps],
+            "laps": [lap.to_dict() for lap in self.laps],
         }
 
 
@@ -87,7 +92,10 @@ class ParsedFit:
     vertical_ratio_pct: float | None = None
     stride_length_m: float | None = None
     best_efforts: dict[str, float] = field(default_factory=dict)
+    duration_bests: dict[str, float] = field(default_factory=dict)
     pace_samples: list[float] = field(default_factory=list)
+    gap_factor: float | None = None
+    gap_samples: list[float] = field(default_factory=list)
     vo2max_garmin: float | None = None
     avg_temperature: int | None = None
     cadence_samples: list[float] = field(default_factory=list)
@@ -99,11 +107,15 @@ class ParsedFit:
 
 
 def parse_fit(content: bytes) -> ParsedFit:
+    """The SDK mostly hands its errors back rather than raising them; they are printed, as an empty result looks like no data."""
     try:
         stream = Stream.from_byte_array(bytearray(content))
         messages, errors = Decoder(stream).read()
-    except Exception:
+    except Exception as exc:
+        print(f"  Warning: FIT decoder failed ({type(exc).__name__}: {exc})")
         return ParsedFit()
+    if errors:
+        print(f"  Warning: FIT decoder reported {len(errors)} error(s), first: {errors[0]}")
     if not messages:
         return ParsedFit()
 
@@ -158,7 +170,11 @@ def parse_fit(content: bytes) -> ParsedFit:
         elevation_samples=elevation_samples,
         elevation_gain_m=round(record_ascent, 1),
         is_race=bool(messages.get("310")),
-        best_efforts=_best_efforts(dist_samples, time_samples),
+        # On the moving clock: a best effort can't include a stop the run's own (timer) duration leaves out.
+        best_efforts=_best_efforts(
+            dist_samples,
+            _moving_clock(dist_samples, time_samples, _timer_pauses(messages.get("event_mesgs", []))),
+        ),
         pace_samples=_pace_samples(dist_samples, time_samples),
         vo2max_garmin=_extract_vo2max(messages),
         cadence_samples=cadence_samples,
@@ -234,16 +250,17 @@ def parse_fit(content: bytes) -> ParsedFit:
         result.start_time_local = _local_start_time(session, activities)
 
     result.splits = _extract_splits(messages)
+    _add_pace_profile(result, records, messages.get("event_mesgs", []))
 
     return result
 
 
 def _extract_splits(messages: dict) -> list[ActivitySplit]:
-    """Extract interval splits and their sub-laps (warmup/active/rest/recovery/cooldown)."""
     raw_splits = messages.get("split_mesgs", [])
     raw_laps = messages.get("lap_mesgs", [])
 
-    # Filter only interval splits and collect their time windows
+    parsed_laps = _parse_laps(raw_laps)
+
     interval_splits = []
     for s in raw_splits:
         split_type = s.get("split_type", "")
@@ -255,33 +272,13 @@ def _extract_splits(messages: dict) -> list[ActivitySplit]:
         interval_splits.append((split_type, s, float(duration)))
 
     if not interval_splits:
-        return []
-
-    # Pre-parse laps: keep only those with a valid start_time
-    parsed_laps = []
-    for lap in raw_laps:
-        start = lap.get("start_time")
-        if not isinstance(start, datetime):
-            continue
-        dist = float(lap.get("total_distance") or 0)
-        timer = float(lap.get("total_timer_time") or lap.get("total_elapsed_time") or 0)
-        if timer <= 0:
-            continue
-        speed = dist / timer
-        raw_hr = lap.get("avg_heart_rate")
-        parsed_laps.append({
-            "start": start,
-            "duration_sec": int(round(timer)),
-            "distance_m": dist,
-            "avg_speed_ms": speed,
-            "avg_hr": int(raw_hr) if raw_hr else None,
-        })
+        return _lap_splits(parsed_laps)
 
     result = []
     for split_type, s, duration in interval_splits:
         distance = float(s.get("total_distance") or 0)
         speed = float(s.get("avg_speed") or 0)
-        # field 15 = avg_heart_rate (undocumented in garmin_fit_sdk for split_mesgs)
+        # Field 15 is avg_heart_rate, undocumented in garmin_fit_sdk for split_mesgs.
         raw_hr = s.get(15) or s.get("avg_heart_rate")
         avg_hr = int(raw_hr) if raw_hr else None
 
@@ -310,10 +307,47 @@ def _extract_splits(messages: dict) -> list[ActivitySplit]:
     return result
 
 
+def _parse_laps(raw_laps: list[dict]) -> list[dict]:
+    parsed_laps = []
+    for lap in raw_laps:
+        start = lap.get("start_time")
+        if not isinstance(start, datetime):
+            continue
+        dist = float(lap.get("total_distance") or 0)
+        timer = float(lap.get("total_timer_time") or lap.get("total_elapsed_time") or 0)
+        if timer <= 0:
+            continue
+        parsed_laps.append({
+            "start": start,
+            "duration_sec": int(round(timer)),
+            "distance_m": dist,
+            "avg_speed_ms": dist / timer,
+            "avg_hr": int(lap["avg_heart_rate"]) if lap.get("avg_heart_rate") else None,
+        })
+    return parsed_laps
+
+
+def _lap_splits(parsed_laps: list[dict]) -> list[ActivitySplit]:
+    """A lap covering no ground carries no pace, and a single lap restates the activity total: neither is a split."""
+    laps = [lap for lap in parsed_laps if lap["distance_m"] > 0]
+    if len(laps) < _MIN_LAP_SPLITS:
+        return []
+
+    return [
+        ActivitySplit(
+            type=_LAP_SPLIT_TYPE,
+            duration_sec=lap["duration_sec"],
+            distance_m=lap["distance_m"],
+            avg_speed_ms=lap["avg_speed_ms"],
+            avg_hr=lap["avg_hr"],
+            laps=[],
+        )
+        for lap in laps
+    ]
+
+
 def _naive_datetime(value: object) -> datetime | None:
-    """`timestamp` comes back decoded, but `local_timestamp` stays a raw FIT
-    timestamp (seconds since 1989-12-31) - comparing the two as datetimes
-    silently yields no offset at all."""
+    """`timestamp` comes back decoded, but `local_timestamp` stays a raw FIT timestamp (seconds since 1989-12-31)."""
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
     if isinstance(value, (int, float)):
@@ -338,7 +372,6 @@ def _local_start_time(session: dict, activities: list[dict]) -> datetime | None:
 
 
 def _extract_vo2max(messages: dict) -> float | None:
-    """Extract Garmin VO2max from FIT message 140, field 7. Formula: raw * 3.5 / 65536."""
     entries = (
         messages.get("max_met_data_mesgs")
         or messages.get(140)
@@ -349,13 +382,13 @@ def _extract_vo2max(messages: dict) -> float | None:
         raw = entry.get(7) or entry.get("7") or entry.get("vo2_max_setting") or entry.get("calibrated_data")
         if raw:
             value = round(int(raw) * 3.5 / 65536, 1)
-            if 20.0 <= value <= 90.0:  # sanity check: plausible VO2max range
+            if 20.0 <= value <= 90.0:
                 return value
     return None
 
 
 def _pace_samples(dists: list[float], times: list[float]) -> list[float]:
-    """Smoothed pace in sec/km using a 30-second backward rolling window."""
+    """Pace in sec/km over a 30-second backward window."""
     n = len(dists)
     if n < 2:
         return []
@@ -368,17 +401,15 @@ def _pace_samples(dists: list[float], times: list[float]) -> list[float]:
         dd = dists[i] - dists[j]
         dt = times[i] - times[j]
         if dd > 1.0 and dt > 0.0:
-            pace = dt / dd * 1000.0  # sec/km
+            pace = dt / dd * 1000.0
             if 90.0 <= pace <= 1200.0:  # 1:30–20:00 /km
                 raw[i] = round(pace, 1)
-    # Forward-fill
     last: float | None = None
     out: list[float] = []
     for v in raw:
         if v is not None:
             last = v
         out.append(last if last is not None else 0.0)
-    # Backward-fill leading zeros with first valid value
     first_valid = next((v for v in out if v > 0.0), None)
     if first_valid is not None:
         for i in range(len(out)):
@@ -386,6 +417,45 @@ def _pace_samples(dists: list[float], times: list[float]) -> list[float]:
                 out[i] = first_valid
             else:
                 break
+    return out
+
+
+_STOP_EVENTS = {"stop", "stop_all", "stop_disable", "stop_disable_all"}
+# Without timer events, a gap this long covering almost no ground is a stop.
+_PAUSE_GAP_S = 10.0
+_PAUSE_SPEED_MS = 0.5
+
+
+def _timer_pauses(events: list[dict]) -> list[tuple[float, float]]:
+    """(stop, restart) spans in epoch seconds."""
+    pauses: list[tuple[float, float]] = []
+    stopped: float | None = None
+    timed = [e for e in events if e.get("event") == "timer" and isinstance(e.get("timestamp"), datetime)]
+    for event in sorted(timed, key=lambda e: e["timestamp"]):
+        ts = event["timestamp"].timestamp()
+        kind = event.get("event_type")
+        if kind in _STOP_EVENTS and stopped is None:
+            stopped = ts
+        elif kind == "start" and stopped is not None:
+            pauses.append((stopped, ts))
+            stopped = None
+    return pauses
+
+
+def _moving_clock(dists: list[float], times: list[float], pauses: list[tuple[float, float]]) -> list[float]:
+    out: list[float] = []
+    offset = 0.0
+    k = 0
+    for i, t in enumerate(times):
+        if pauses:
+            while k < len(pauses) and pauses[k][1] <= t:
+                offset += pauses[k][1] - pauses[k][0]
+                k += 1
+        elif i:
+            dt = t - times[i - 1]
+            if dt > _PAUSE_GAP_S and (dists[i] - dists[i - 1]) / dt < _PAUSE_SPEED_MS:
+                offset += dt
+        out.append(t - offset)
     return out
 
 
@@ -425,12 +495,35 @@ def _best_efforts(dists: list[float], times: list[float]) -> dict[str, float]:
     return out
 
 
+def _add_pace_profile(result: ParsedFit, records: list[dict], events: list[dict]) -> None:
+    """Duration bests and grade-adjusted pace, over the same records as pace_samples so the two streams line up."""
+    dists: list[float] = []
+    times: list[float] = []
+    alts: list[float | None] = []
+    for rec in records:
+        dist = rec.get("distance")
+        ts = rec.get("timestamp")
+        if dist is not None and isinstance(ts, datetime):
+            dists.append(float(dist))
+            times.append(ts.timestamp())
+            alt = rec.get("enhanced_altitude")
+            if alt is None:
+                alt = rec.get("altitude")
+            alts.append(float(alt) if alt is not None else None)
+    result.duration_bests = duration_bests(dists, _moving_clock(dists, times, _timer_pauses(events)))
+    flat = flat_equivalent(dists, alts)
+    if flat is None or dists[-1] - dists[0] <= 0:
+        return
+    result.gap_factor = round(flat[-1] / (dists[-1] - dists[0]), 4)
+    result.gap_samples = _pace_samples(flat, times)
+
+
 _ROUTE_EPSILON_M = 0.5
 _METERS_PER_DEGREE = 111_320.0
 
 
 def _project_meters(lon: float, lat: float, lon0: float, lat0: float) -> tuple[float, float]:
-    """Equirectangular projection centered on the route, accurate enough at a single-run scale."""
+    """Equirectangular, accurate enough at a single-run scale."""
     x = (lon - lon0) * math.cos(math.radians(lat0)) * _METERS_PER_DEGREE
     y = (lat - lat0) * _METERS_PER_DEGREE
     return x, y
@@ -447,14 +540,17 @@ def _perpendicular_distance(point: tuple[float, float], start: tuple[float, floa
     return num / den
 
 
-def _rdp_keep_mask(points: list[tuple[float, float]], epsilon: float) -> list[bool]:
-    """Douglas-Peucker simplification: drops points close to the line between
-    their neighbors, keeps points at turns. Always keeps the first and last point."""
-    keep = [False] * len(points)
-    keep[0] = keep[-1] = True
-    stack = [(0, len(points) - 1)]
+def _rdp_significance(points: list[tuple[float, float]], floor: float) -> list[float]:
+    """For each point, the largest epsilon at which Douglas-Peucker keeps it, exact for every epsilon from `floor` up.
+
+    Which point is farthest does not depend on epsilon, so a point survives exactly while its own distance and every
+    ancestor's exceed epsilon: one pass answers the simplification for every epsilon at once.
+    """
+    significance = [0.0] * len(points)
+    significance[0] = significance[-1] = math.inf
+    stack = [(0, len(points) - 1, math.inf)]
     while stack:
-        start_i, end_i = stack.pop()
+        start_i, end_i, ceiling = stack.pop()
         start, end = points[start_i], points[end_i]
         max_dist = 0.0
         max_i = -1
@@ -463,22 +559,29 @@ def _rdp_keep_mask(points: list[tuple[float, float]], epsilon: float) -> list[bo
             if dist > max_dist:
                 max_dist = dist
                 max_i = i
-        if max_i != -1 and max_dist > epsilon:
-            keep[max_i] = True
-            stack.append((start_i, max_i))
-            stack.append((max_i, end_i))
-    return keep
+        if max_i != -1 and max_dist > floor:
+            kept_until = min(max_dist, ceiling)
+            significance[max_i] = kept_until
+            stack.append((start_i, max_i, kept_until))
+            stack.append((max_i, end_i, kept_until))
+    return significance
 
 
 def _decimate(coords: list[list[float]], max_points: int) -> list[list[float]]:
+    """Douglas-Peucker at the smallest epsilon of the ladder 0.5 m, x1.5, x1.5... that brings the route down to max_points."""
     if len(coords) < 3:
         return coords
+    if max_points < 2:
+        raise ValueError("the first and last points are always kept, so max_points must be at least 2")
     lon0, lat0 = coords[len(coords) // 2]
     points = [_project_meters(lon, lat, lon0, lat0) for lon, lat in coords]
+    significance = _rdp_significance(points, floor=_ROUTE_EPSILON_M)
 
+    # kept(epsilon) fits under the cap once epsilon reaches the significance
+    # of the first point past it.
     epsilon = _ROUTE_EPSILON_M
-    keep = _rdp_keep_mask(points, epsilon)
-    while sum(keep) > max_points:
-        epsilon *= 1.5
-        keep = _rdp_keep_mask(points, epsilon)
-    return [c for c, k in zip(coords, keep) if k]
+    over_cap = sorted(significance, reverse=True)[max_points:]
+    if over_cap:
+        while epsilon < over_cap[0]:
+            epsilon *= 1.5
+    return [c for c, s in zip(coords, significance, strict=True) if s > epsilon]

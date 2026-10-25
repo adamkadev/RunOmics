@@ -3,11 +3,11 @@ import { overlap, routeCells, routeOutline, type Coord } from '../routeShape'
 
 describe('routeCells', () => {
   it('collapses points within the same ~110 m tile', () => {
-    expect(routeCells([[-150.0000, 0.0000], [-150.00002, 0.00003]])).toEqual(new Set(['0:-150000']))
+    expect(routeCells([[6.1000, 49.6000], [6.10002, 49.60003]])).toEqual(new Set(['49600:6100']))
   })
 
   it('separates points a tile apart', () => {
-    expect(routeCells([[-150.0, 0.0], [-150.0, 0.002]]).size).toBe(2)
+    expect(routeCells([[6.1, 49.6], [6.1, 49.602]]).size).toBe(2)
   })
 })
 

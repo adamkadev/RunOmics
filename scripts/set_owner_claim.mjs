@@ -1,16 +1,4 @@
 #!/usr/bin/env node
-// One-time (re-runnable) setup: grants the owner's Firebase Auth user the
-// custom claim firestore.rules checks, instead of comparing a hardcoded
-// email. Run once per Firebase project - dev and prod each need this run
-// against their own project's credentials - and again if the owner ever
-// signs in with a different Google account.
-//
-//   npm run set-owner-claim              # uses .env.local
-//
-// Needs FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY (the
-// same Admin SDK credential the app already uses) and NEXT_PUBLIC_OWNER_EMAIL
-// in the environment. This mutates live Firebase Auth state - review the
-// target project before running.
 
 import { initializeApp, cert } from 'firebase-admin/app'
 import { getAuth } from 'firebase-admin/auth'
@@ -31,6 +19,22 @@ initializeApp({
 
 const auth = getAuth()
 const user = await auth.getUserByEmail(email)
+
+// The claim is looked up by email, so the account must be one Google vouches for: with another provider enabled,
+// anyone could register the owner's address first, unverified.
+const signsInWithGoogle = user.providerData.some((provider) => provider.providerId === 'google.com')
+const reasons = [
+  ...(user.emailVerified ? [] : ['its email is not verified']),
+  ...(signsInWithGoogle ? [] : ['it has never signed in with Google']),
+]
+if (reasons.length) {
+  console.error(
+    `Refusing to grant the owner claim to ${email} (uid: ${user.uid}): ${reasons.join(' and ')}. ` +
+      'Sign in to the app with that Google account first, then re-run.'
+  )
+  process.exit(1)
+}
+
 await auth.setCustomUserClaims(user.uid, { ...user.customClaims, owner: true })
 
 console.log(`Granted the "owner" custom claim to ${email} (uid: ${user.uid}).`)

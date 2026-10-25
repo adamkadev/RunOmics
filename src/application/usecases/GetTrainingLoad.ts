@@ -1,10 +1,11 @@
-import { t } from '@/i18n'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { getAthleteProfile } from '@/infrastructure/repositories/JsonAthleteRepository'
 import { round } from '@/lib/math'
 import type { Activity } from '@/domain/activity/types'
 import { trimp, DEFAULT_HR_BOUNDS, type HrBounds } from '@/domain/training/trimp'
-import { CTL_DAYS, ATL_DAYS, type LoadSnapshot } from '@/domain/training/taper'
+import { ATL_DAYS, type LoadSnapshot } from '@/domain/training/taper'
+import { loadSeries } from '@/domain/training/loadSeries'
+import { appTodayIso } from '@/lib/calendarDate'
 
 export { trimp, type HrBounds }
 export { ATL_DAYS, type LoadSnapshot }
@@ -13,7 +14,6 @@ const MAX_DAYS = 1095
 
 export interface TrainingLoadPoint {
   date: string
-  label: string
   ctl: number
   atl: number
   tsb: number
@@ -27,11 +27,6 @@ export interface TrainingLoadData {
   tsbNow: number
 }
 
-function isoDate(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-// Exposed separately from buildTimeSeries because monotony/strain need the raw daily series, not CTL/ATL.
 export function dailyTrimpByDate(activities: Activity[], hrBounds: HrBounds = DEFAULT_HR_BOUNDS): Map<string, number> {
   const dailyLoad = new Map<string, number>()
   for (const a of activities) {
@@ -40,30 +35,28 @@ export function dailyTrimpByDate(activities: Activity[], hrBounds: HrBounds = DE
   return dailyLoad
 }
 
-// Full TRIMP time series from first activity to today.
-// TSB is the form at the START of each day (before that day's load).
+// By the activity list, the same array until the data changes, then by bounds and day: a render reads it several times.
+const seriesCache = new WeakMap<Activity[], Map<string, Map<string, LoadSnapshot>>>()
+
+/** Shared between callers: read it, never change it. */
 export function buildTimeSeries(activities: Activity[], hrBounds: HrBounds = DEFAULT_HR_BOUNDS): Map<string, LoadSnapshot> {
-  const dailyLoad = dailyTrimpByDate(activities, hrBounds)
+  const today = appTodayIso()
+  const key = `${hrBounds.maxHr}|${hrBounds.restingHr}|${today}`
+  let byKey = seriesCache.get(activities)
+  if (!byKey) seriesCache.set(activities, (byKey = new Map()))
+  let series = byKey.get(key)
+  if (!series) byKey.set(key, (series = timeSeries(activities, hrBounds, today)))
+  return series
+}
 
+function timeSeries(activities: Activity[], hrBounds: HrBounds, today: string): Map<string, LoadSnapshot> {
   const series = new Map<string, LoadSnapshot>()
-  const firstAct = activities[activities.length - 1]
-  if (!firstAct) return series
-  const first = new Date(firstAct.date + 'T00:00:00')
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
+  const first = activities.reduce<string | null>((min, a) => (min === null || a.date < min ? a.date : min), null)
+  if (!first) return series
 
-  let ctl = 0
-  let atl = 0
-
-  for (let d = new Date(first); d <= today; d.setDate(d.getDate() + 1)) {
-    const date = isoDate(d)
-    const tsb = ctl - atl
-    const load = dailyLoad.get(date) ?? 0
-    ctl += (load - ctl) / CTL_DAYS
-    atl += (load - atl) / ATL_DAYS
-    series.set(date, { ctl: round(ctl), atl: round(atl), tsb: round(tsb) })
+  for (const [date, day] of loadSeries(dailyTrimpByDate(activities, hrBounds), first, today)) {
+    series.set(date, { ctl: round(day.ctl), atl: round(day.atl), tsb: round(day.tsb) })
   }
-
   return series
 }
 
@@ -81,14 +74,7 @@ export async function getTrainingLoad(): Promise<TrainingLoadData | null> {
   const entries = Array.from(series.entries())
   const window = entries.slice(-MAX_DAYS)
 
-  const points: TrainingLoadPoint[] = window.map(([date, snap]) => {
-    const d = new Date(date + 'T00:00:00')
-    return {
-      date,
-      label: d.toLocaleDateString(t.locale, { day: 'numeric', month: 'short' }),
-      ...snap,
-    }
-  })
+  const points: TrainingLoadPoint[] = window.map(([date, snap]) => ({ date, ...snap }))
 
   const last = points[points.length - 1]
   if (!last) return null

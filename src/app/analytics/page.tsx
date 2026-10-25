@@ -1,83 +1,74 @@
 import { getAnalyticsData } from '@/application/usecases/GetAnalyticsData'
-import { getYearComparison } from '@/application/usecases/GetYearComparison'
-import { getSeasonHeadline } from '@/application/usecases/GetSeasonHeadline'
-import { getSeasonInsight } from '@/application/usecases/GetSeasonInsight'
-import { analyticsTabFacts } from '@/application/usecases/GetAnalyticsTabFacts'
-import { getAnalyticsTabInsights } from '@/application/usecases/GetAnalyticsTabInsights'
-import { getTrainingStatus } from '@/application/usecases/GetTrainingStatus'
-import { getVO2maxSeries, getLatestVO2max } from '@/application/usecases/GetVO2maxHistory'
+import { appTodayIso } from '@/lib/calendarDate'
+import { getVO2maxReadings } from '@/application/usecases/GetVO2maxHistory'
 import { getTrainingLoad } from '@/application/usecases/GetTrainingLoad'
 import { getLoadRiskPanel } from '@/application/usecases/GetLoadRiskPanel'
-import { getLoadBalance } from '@/application/usecases/GetLoadBalance'
 import { getTrainingStatusHistory } from '@/application/usecases/GetTrainingStatusHistory'
 import { getGarminRacePredictions } from '@/application/usecases/GetGarminRacePredictions'
 import { getThresholdHistory } from '@/application/usecases/GetThresholdHistory'
-import { getHeatmapData } from '@/application/usecases/GetHeatmapData'
 import { getHeatImpact } from '@/application/usecases/GetHeatImpact'
-import { getAthleteProfile } from '@/infrastructure/repositories/JsonAthleteRepository'
-import { vo2maxTopPercent } from '@/domain/athlete/vo2maxNorms'
-import { AnalyticsClient } from '@/components/analytics/AnalyticsClient'
+import { getLoadBalance } from '@/application/usecases/GetLoadBalance'
+import { getGoalsPageData } from '@/application/usecases/GetGoalsData'
+import { getActivitySummaries } from '@/application/usecases/GetActivities'
+import { getCoachingOverview } from '@/application/coaching/GetCoachingView'
+import { isRaceDistanceKey, type RaceDistanceKey } from '@/domain/race/distances'
+import { weeklyAverageKm } from '@/domain/training/weeklyAverage'
+import { AnalyticsClient, type AnalyticsBoardData } from '@/components/analytics/AnalyticsClient'
+import { yearOverYear } from '@/lib/yearOverYear'
+import { loadPlanWeeks } from '../_data/loadPlanWeeks'
+import { getLoadPairs, getRecoveryHistory } from '@/application/usecases/GetLoadRecovery'
+import { loadData } from '@/application/usecases/LoadData'
+import { getPaceBests } from '@/application/usecases/GetPaceCurve'
 
 export const revalidate = 3600
 
 export default async function AnalyticsPage() {
-  const [data, comparison, vo2maxHistory, trainingLoad, loadRisk] = await Promise.all([
-    getAnalyticsData(),
-    Promise.resolve(getYearComparison()),
-    Promise.resolve(getVO2maxSeries()),
-    getTrainingLoad(),
-    getLoadRiskPanel(),
-  ])
+  await loadData()
+  const today = appTodayIso()
+  const year = Number(today.slice(0, 4))
+  const [data, trainingLoad, risk, goals] = await Promise.all([getAnalyticsData(), getTrainingLoad(), getLoadRiskPanel(), getGoalsPageData(today)])
 
-  const loadBalance = getLoadBalance()
-  const statusHistory = getTrainingStatusHistory()
-  const racePredictions = getGarminRacePredictions()
-  const threshold = getThresholdHistory()
+  const activities = getActivitySummaries()
+  const plan = await loadPlanWeeks(getCoachingOverview(today), today)
+  const yearData = goals.byYear[year] ?? null
+  const spotlight = goals.nextRace
+  const goalKm = yearData?.goals && yearData.goals.annualDistanceKm > 0 ? yearData.goals.annualDistanceKm : null
 
-  const seasonHeadline = getSeasonHeadline(data, comparison)
-  const seasonInsight = await getSeasonInsight(seasonHeadline)
+  const threshold = getThresholdHistory()?.points ?? []
+  const board: AnalyticsBoardData = {
+    load: trainingLoad?.points.map(({ date, ctl, atl }) => ({ date, ctl, atl })) ?? [],
+    status: getTrainingStatusHistory()?.points.map(({ date, status }) => ({ date, status })) ?? [],
+    risk,
+    loads: getLoadPairs(),
+    recovery: getRecoveryHistory(),
+    weeks: data.weeklyTrends,
+    plan: plan.weeks,
+    missed: plan.missed,
+    vo2max: getVO2maxReadings(),
+    threshold: threshold.flatMap((p) => (p.thresholdPaceSecPerKm !== null ? [{ date: p.date, pace: p.thresholdPaceSecPerKm }] : [])),
+    lthr: threshold.flatMap((p) => (p.lthrBpm !== null ? [{ date: p.date, bpm: p.lthrBpm }] : [])),
+    predictions: getGarminRacePredictions()?.points.map(({ date, seconds }) => ({ date, seconds })) ?? [],
+    race:
+      spotlight && isRaceDistanceKey(spotlight.race.distance.toLowerCase())
+        ? {
+            distance: spotlight.race.distance.toLowerCase() as RaceDistanceKey,
+            date: spotlight.race.date,
+            daysUntil: spotlight.daysUntil,
+            targetSeconds: spotlight.race.targetSeconds ?? null,
+          }
+        : null,
+    heat: getHeatImpact(),
+    balance: getLoadBalance(),
+    paceBests: getPaceBests(),
+    weeklyAvgKm: weeklyAverageKm(activities, today),
+    // Goals' own figures: Volume summarises them and links there.
+    ytd: {
+      km: yearData?.totalDistanceKm ?? 0,
+      vsLastYear: yearOverYear(activities, today),
+      goalKm,
+      projection: yearData?.projection ? { projectedYearKm: yearData.projection.projectedYearKm } : null,
+    },
+  }
 
-  const tabInsights = await getAnalyticsTabInsights(
-    analyticsTabFacts({
-      data,
-      status: await getTrainingStatus(),
-      load: trainingLoad,
-      loadRisk,
-      loadBalance,
-      threshold,
-      racePredictions,
-      vo2max: getLatestVO2max(),
-    })
-  )
-
-  const athlete = getAthleteProfile()
-  const latestVO2max = getLatestVO2max()
-  const topPercent =
-    latestVO2max !== null && athlete.age !== undefined && athlete.sex
-      ? vo2maxTopPercent(latestVO2max, athlete.age, athlete.sex)
-      : null
-  const activeDays = getHeatmapData().filter((d) => d.distanceKm > 0).length
-  const heatImpact = getHeatImpact()
-
-  return (
-    <div className="space-y-6">
-      <AnalyticsClient
-        data={data}
-        comparison={comparison}
-        seasonHeadline={seasonHeadline}
-        seasonInsight={seasonInsight}
-        tabInsights={tabInsights}
-        vo2maxHistory={vo2maxHistory}
-        trainingLoad={trainingLoad}
-        loadRisk={loadRisk}
-        loadBalance={loadBalance}
-        statusHistory={statusHistory}
-        racePredictions={racePredictions}
-        threshold={threshold}
-        vo2maxTopPercent={topPercent}
-        activeDays={activeDays}
-        heatImpact={heatImpact}
-      />
-    </div>
-  )
+  return <AnalyticsClient data={board} today={today} />
 }

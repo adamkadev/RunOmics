@@ -22,8 +22,8 @@ export function SaveButton({ state, onClick, type = 'button' }: Props) {
       onClick={onClick}
       disabled={state === 'saving'}
       className={cn(
-        'rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-50',
-        state === 'error' ? 'bg-red-500 text-white hover:bg-red-600' :
+        'hit-44 h-11 rounded-full px-4 text-[17px] font-semibold transition-colors disabled:opacity-50',
+        state === 'error' ? 'bg-destructive text-white hover:bg-destructive/90' :
         'bg-accent text-accent-foreground hover:bg-accent/90'
       )}
     >

@@ -2,6 +2,47 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.2.1] - 2026-10-25
+
+The public demo catches up with three months of work on the private app: a
+redesign for the iPhone, new screens and a stricter export of the code.
+
+### Redesign
+
+- Liquid Glass surfaces modelled on iOS 26: a floating tab bar with five tabs
+  (Today, Activities, Plan, Analytics, Progress), glass controls over maps,
+  sheets with detents, inset-grouped lists and the iOS type ramp.
+- One score and one verdict per screen; light and dark themes from one token
+  table, accent palettes and a background glow that can be switched off.
+- RunOmics' own greyscale basemaps, so the runs are the only colour on a map.
+
+### New
+
+- Today: the load verdict with form, fitness and fatigue, today's session and
+  the week against the plan.
+- Activities: a list with filters and a heatmap of every route, with a
+  home-area summary; an activity's splits, dynamics against your usual and a
+  shareable card.
+- Progress: the next race (prediction, target, best, 12-week trend and
+  even-pace splits), goals and the season, records, consistency, shoes and
+  all-time totals.
+- Explore: quartier coverage, a loop-route generator for new ground and GPX
+  export.
+- An adaptive coach, as a local CLI, that writes and reviews four-week blocks.
+- An optional private site: every page answers only to the owner or invited
+  accounts.
+- The app reloads itself after a deploy, opens a page from its cache on a bad
+  network, and reports client errors scrubbed of coordinates.
+
+### Public repository
+
+- The code is exported from the private repository by a script that leaves out
+  the personal deployments' workflows and tooling and stops on anything that
+  belongs to a real athlete. The scheduled sync and reminder workflows, which
+  failed here without their secrets, are gone.
+- The README screenshots are phone-sized and taken from the demo dataset.
+- Link previews come from Next's `opengraph-image` and `twitter-image` files.
+
 ## [3.1.0] - 2026-07-07
 
 Closes the two "out of scope" chantiers of the v4 audit (B2 similar runs, C2

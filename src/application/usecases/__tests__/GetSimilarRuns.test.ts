@@ -3,9 +3,6 @@ import type { Activity } from '@/domain/activity/types'
 
 vi.mock('@/infrastructure/repositories/JsonActivityRepository', () => ({ getAllActivities: vi.fn() }))
 
-// Route geometry is covered by lib/__tests__/routeMatch.test.ts. Here the
-// matcher is stubbed so the assertions are about this use case's own gate,
-// ranking and ordering rather than about grid overlap.
 vi.mock('@/lib/routeMatch', () => ({
   SIMILAR_ROUTE_MIN_SIMILARITY: 0.85,
   buildRouteCellSet: vi.fn(() => ({ cells: new Set<string>(), size: 0 })),
@@ -40,8 +37,6 @@ async function run(activities: Activity[], activityId: string, matcher: Matcher 
   const { isSimilarDistance, routeSimilarity } = await import('@/lib/routeMatch')
 
   vi.mocked(getAllActivities).mockReturnValue(activities)
-  // Set every call, not just the overridden one: mock implementations survive
-  // clearAllMocks, so a leftover from a previous test would leak in here.
   vi.mocked(isSimilarDistance).mockReturnValue(matcher.similarDistance ?? true)
   vi.mocked(routeSimilarity).mockReturnValue(matcher.similarity ?? 1)
 
@@ -125,7 +120,6 @@ describe('getSimilarRuns', () => {
       activity('b', '2026-02-01', 300),
       activity('c', '2026-03-01', 280),
     ]
-    // Only the viewed run survives, which is below the minimum.
     expect(await run(three, 'a', { similarDistance: false })).toBeNull()
   })
 
@@ -167,5 +161,16 @@ describe('getSimilarRuns', () => {
 
     expect(data?.runs.map((r) => r.id)).toEqual(['a', 'c', 'd'])
     expect(data?.count).toBe(3)
+  })
+
+  it('works a run out once per data, however often its page renders', async () => {
+    const three = [activity('a', '2026-01-01', 300), activity('b', '2026-02-01', 290), activity('c', '2026-03-01', 280)]
+    const first = await run(three, 'a')
+    const { routeSimilarity } = await import('@/lib/routeMatch')
+    const { getSimilarRuns } = await import('../GetSimilarRuns')
+    vi.mocked(routeSimilarity).mockClear()
+
+    expect(getSimilarRuns('a')).toBe(first)
+    expect(routeSimilarity).not.toHaveBeenCalled()
   })
 })

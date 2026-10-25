@@ -1,18 +1,25 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { handleInternalRoute } from '@/lib/internalRoute'
-import { sendPushToAllDevices } from '@/lib/sendPushNotification'
+import { sendPushes } from '@/lib/sendPushNotification'
 import { getShoeWearAlerts } from '@/application/usecases/GetShoeWearAlerts'
+import { formatNumber } from '@/lib/formatters'
+import { t } from '@/i18n'
+import { loadData } from '@/application/usecases/LoadData'
 
 export async function POST(req: NextRequest) {
   return handleInternalRoute('shoe-wear-check', req, async () => {
-    const newAlerts = await getShoeWearAlerts()
+    await loadData()
+    const { newAlerts, commit } = await getShoeWearAlerts()
 
-    for (const alert of newAlerts) {
-      await sendPushToAllDevices(
-        `Shoe wear alert: ${alert.name}`,
-        `${alert.totalKm} km - past its ${alert.alertThresholdKm} km alert threshold`
-      )
-    }
+    // Stored only once every alert went out, as in pr-check.
+    await sendPushes(
+      'shoes',
+      newAlerts.map((alert) => ({
+        title: t.notifications.shoeWear.title(alert.name),
+        body: t.notifications.shoeWear.body(formatNumber(alert.totalKm, 0), formatNumber(alert.alertThresholdKm, 0)),
+      }))
+    )
+    await commit()
 
     return NextResponse.json({ newAlerts })
   })

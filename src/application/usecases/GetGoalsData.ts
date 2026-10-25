@@ -1,5 +1,6 @@
 import type { Activity } from '@/domain/activity/types'
 import { yearDistanceKm } from '@/domain/activity/distance'
+import { getPlannedWorkouts } from './GetPlannedWorkouts'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { getUpcomingRaceYears } from '@/infrastructure/repositories/JsonUpcomingRaceRepository'
 import { getGoalYears } from '@/infrastructure/repositories/JsonGoalRepository'
@@ -7,43 +8,12 @@ import { getPbYears } from '@/infrastructure/repositories/JsonPbRepository'
 import { getGarminRacePredictions } from './GetGarminRacePredictions'
 import { DISTANCE_KEY, getRecords } from './GetRecords'
 import { RACE_DISTANCES, type RaceDistanceKey } from '@/domain/race/distances'
-import { addDays, startOfWeek } from '@/lib/calendarDate'
+import { DAY_MS, addDays, appTodayIso, isoDate, startOfWeek } from '@/lib/calendarDate'
+import { weeklyAverageKm } from '@/domain/training/weeklyAverage'
 import { round } from '@/lib/math'
+import type { PbEntry, GoalYear, UpcomingRace } from '@/domain/goals/types'
 
-export interface PbEntry {
-  distance: string
-  seconds: number
-  activityId: string
-}
-
-export interface PbYear {
-  year: number
-  entries: PbEntry[]
-}
-
-export interface GoalTarget {
-  distance: string
-  targetSeconds: number | null
-}
-
-export interface GoalYear {
-  year: number
-  annualDistanceKm: number
-  targets: GoalTarget[]
-}
-
-export interface UpcomingRace {
-  date: string
-  name: string
-  distance: string
-  location?: string
-  targetSeconds?: number | null
-}
-
-export interface UpcomingRaceYear {
-  year: number
-  races: UpcomingRace[]
-}
+export type { PbEntry, PbYear, GoalTarget, GoalYear, UpcomingRace, UpcomingRaceYear } from '@/domain/goals/types'
 
 export interface PbData {
   entry: PbEntry
@@ -58,11 +28,18 @@ export interface GoalProjection {
   deltaKm: number
 }
 
+export interface MonthProgress {
+  daysElapsed: number
+  daysInMonth: number
+  proRataTargetKm: number
+}
+
 export interface MonthGoal {
   month: number
   targetKm: number
   actualKm: number
   status: 'ahead' | 'on_track' | 'behind' | 'pending'
+  progress: MonthProgress | null
 }
 
 export interface NextRaceSpotlight {
@@ -74,7 +51,6 @@ export interface NextRaceSpotlight {
   prDate: string | null
 }
 
-/** A distance's predicted finish time, sourced from Garmin's own race predictor. */
 export interface GoalRacePrediction {
   key: RaceDistanceKey
   predictedSeconds: number
@@ -111,6 +87,8 @@ export interface GoalsPageData {
   years: number[]
   byYear: Record<number, YearData>
   history: YearOutcome[]
+  /** The next race in any year; each year's own spotlight only sees that year's races. */
+  nextRace: NextRaceSpotlight | null
 }
 
 export function computeProjection(
@@ -118,24 +96,19 @@ export function computeProjection(
   year: number,
   totalDistanceKm: number,
   goals: GoalYear,
+  now = new Date(),
 ): GoalProjection | null {
   const goal = goals.annualDistanceKm
   if (goal <= 0 || totalDistanceKm >= goal) return null
 
-  const now = new Date()
   const yearStart = new Date(year, 0, 1)
   const yearEnd = new Date(year + 1, 0, 1)
-  const weeksElapsed = (now.getTime() - yearStart.getTime()) / (7 * 86_400_000)
-  const remainingWeeks = (yearEnd.getTime() - now.getTime()) / (7 * 86_400_000)
+  const weeksElapsed = (now.getTime() - yearStart.getTime()) / (7 * DAY_MS)
+  const remainingWeeks = (yearEnd.getTime() - now.getTime()) / (7 * DAY_MS)
 
   if (weeksElapsed < 4 || remainingWeeks <= 0) return null
 
-  // Rolling 8-week rate: uses all activities (not filtered by year) for cross-year accuracy
-  const cutoff = new Date(now.getTime() - 56 * 86_400_000)
-  const recentKm = activities
-    .filter((a) => new Date(a.date + 'T00:00:00') >= cutoff)
-    .reduce((s, a) => s + a.distanceKm, 0)
-  const weeklyRate = round(recentKm / 8, 1)
+  const weeklyRate = weeklyAverageKm(activities, isoDate(now))
 
   const weeklyNeeded = round((goal - totalDistanceKm) / remainingWeeks, 1)
   const projectedYearKm = Math.round(totalDistanceKm + weeklyRate * remainingWeeks)
@@ -148,19 +121,36 @@ export function computeProjection(
   return { weeklyRate, weeklyNeeded, projectedYearKm, status, deltaKm }
 }
 
-// Each month's target is the annual goal pro-rated by its share of days in the year.
-// Months are independent: a missed month does not raise the target for the next one.
-export function computeMonthlyGoals(activities: Activity[], year: number, goals: GoalYear): MonthGoal[] {
-  const annualKm = goals.annualDistanceKm
-  const now = new Date()
-  const daysInYear = (new Date(year + 1, 0, 1).getTime() - new Date(year, 0, 1).getTime()) / 86_400_000
+/** Planned km by "YYYY-MM" month. */
+export type PlannedKmByMonth = ReadonlyMap<string, number>
+
+export function plannedKmByMonth(planned: readonly { date: string; distanceM?: number }[]): PlannedKmByMonth {
+  const byMonth = new Map<string, number>()
+  for (const p of planned) {
+    if (!p.distanceM) continue
+    const key = p.date.slice(0, 7)
+    byMonth.set(key, (byMonth.get(key) ?? 0) + p.distanceM / 1000)
+  }
+  return new Map([...byMonth].map(([key, km]) => [key, round(km, 1)]))
+}
+
+export function computeMonthlyGoals(
+  activities: Activity[],
+  year: number,
+  goals: GoalYear,
+  now = new Date(),
+  planned: PlannedKmByMonth = new Map(),
+): MonthGoal[] {
+  // A month's target is what the plan asks of it, so Goals and Plan agree; a
+  // month the plan does not cover keeps a twelfth of the year.
+  const evenShare = round(goals.annualDistanceKm / 12, 1)
 
   return Array.from({ length: 12 }, (_, i) => {
     const month = i + 1
+    const targetKm = planned.get(`${year}-${String(month).padStart(2, '0')}`) ?? evenShare
     const monthStart = new Date(year, month - 1, 1)
     const monthEnd = new Date(year, month, 1)
-    const daysInMonth = (monthEnd.getTime() - monthStart.getTime()) / 86_400_000
-    const targetKm = round((annualKm * daysInMonth) / daysInYear, 1)
+    const daysInMonth = Math.round((monthEnd.getTime() - monthStart.getTime()) / DAY_MS)
 
     const actualKm = round(
       activities
@@ -173,20 +163,40 @@ export function computeMonthlyGoals(activities: Activity[], year: number, goals:
     )
 
     let status: MonthGoal['status']
+    let progress: MonthProgress | null = null
     if (monthStart > now) {
       status = 'pending'
     } else if (monthEnd <= now) {
       status = actualKm >= targetKm ? 'ahead' : 'behind'
     } else {
-      const expectedFraction = (now.getTime() - monthStart.getTime()) / 86_400_000 / daysInMonth
+      const daysElapsed = now.getDate()
+      const expectedFraction = daysElapsed / daysInMonth
       const actualFraction = targetKm > 0 ? actualKm / targetKm : 0
       status =
         actualFraction > expectedFraction * 1.1 ? 'ahead' :
         actualFraction < expectedFraction * 0.9 ? 'behind' : 'on_track'
+      progress = {
+        daysElapsed,
+        daysInMonth,
+        proRataTargetKm: round(targetKm * expectedFraction, 1),
+      }
     }
 
-    return { month, targetKm, actualKm, status }
+    return { month, targetKm, actualKm, status, progress }
   })
+}
+
+export function nextRaceAcrossYears(
+  upcomingRaceYears: readonly { year: number; races: UpcomingRace[] }[],
+  currentYear: number,
+  predictions: GoalRacePrediction[],
+  today: string,
+): NextRaceSpotlight | null {
+  const races = upcomingRaceYears
+    .filter((u) => u.year >= currentYear)
+    .flatMap((u) => u.races)
+    .sort((a, b) => a.date.localeCompare(b.date))
+  return computeNextRaceSpotlight(races, predictions, today)
 }
 
 export function computeNextRaceSpotlight(
@@ -198,14 +208,12 @@ export function computeNextRaceSpotlight(
   if (!race) return null
 
   const daysUntil = Math.round(
-    (new Date(race.date + 'T00:00:00').getTime() - new Date(today + 'T00:00:00').getTime()) / 86_400_000
+    (new Date(race.date + 'T00:00:00').getTime() - new Date(today + 'T00:00:00').getTime()) / DAY_MS
   )
 
   const predictionKey = DISTANCE_KEY[race.distance]
   const prediction = predictionKey ? predictions.find((p) => p.key === predictionKey) ?? null : null
 
-  // Never predict slower than a PR already proven at this exact distance -
-  // Garmin's model can undershoot when its own recent form estimate lags a fresh PR.
   const predictedSeconds =
     prediction?.predictedSeconds != null && prediction.actualSeconds != null
       ? Math.min(prediction.predictedSeconds, prediction.actualSeconds)
@@ -254,7 +262,7 @@ export interface WeeklyGoal {
 export function computeWeeklyGoal(activities: Activity[], year: number, goals: GoalYear, now = new Date()): WeeklyGoal | null {
   if (goals.annualDistanceKm <= 0) return null
 
-  const daysInYear = (new Date(year + 1, 0, 1).getTime() - new Date(year, 0, 1).getTime()) / 86_400_000
+  const daysInYear = (new Date(year + 1, 0, 1).getTime() - new Date(year, 0, 1).getTime()) / DAY_MS
   const targetKm = round((goals.annualDistanceKm * 7) / daysInYear, 1)
 
   const weekStart = startOfWeek(now)
@@ -272,17 +280,15 @@ export function computeWeeklyGoal(activities: Activity[], year: number, goals: G
   return { targetKm, actualKm }
 }
 
-/** The current week's distance goal, prorated from the current year's annual target - null if no goal is set. */
-export async function getCurrentWeeklyGoal(): Promise<WeeklyGoal | null> {
-  const year = new Date().getFullYear()
+export async function getCurrentWeeklyGoal(today: string = appTodayIso()): Promise<WeeklyGoal | null> {
+  const now = new Date(`${today}T12:00:00`)
+  const year = now.getFullYear()
   const goalYears = getGoalYears()
   const goals = goalYears.find((g) => g.year === year)
   if (!goals) return null
-  return computeWeeklyGoal(getAllActivities(), year, goals)
+  return computeWeeklyGoal(getAllActivities(), year, goals, now)
 }
 
-// Garmin's `latest` finish-time estimate per distance, paired with the athlete's own
-// PR at that distance (for the "never predict slower than a proven PR" cap below).
 async function getGoalPredictions(): Promise<GoalRacePrediction[]> {
   const garmin = getGarminRacePredictions()
   if (!garmin) return []
@@ -301,12 +307,13 @@ async function getGoalPredictions(): Promise<GoalRacePrediction[]> {
   })
 }
 
-export async function getGoalsPageData(): Promise<GoalsPageData> {
+export async function getGoalsPageData(today: string = appTodayIso()): Promise<GoalsPageData> {
   const activities = getAllActivities()
   const upcomingRaceYears = getUpcomingRaceYears()
   const goalYears = getGoalYears()
   const pbYears = getPbYears()
   const predictions = await getGoalPredictions()
+  const plannedByMonth = plannedKmByMonth(await getPlannedWorkouts())
 
   const activityMap = new Map(activities.map((a) => [a.id, a]))
 
@@ -318,8 +325,8 @@ export async function getGoalsPageData(): Promise<GoalsPageData> {
     ])
   ).sort((a, b) => b - a)
 
-  const currentYear = new Date().getFullYear()
-  const today = new Date().toISOString().slice(0, 10)
+  const now = new Date(`${today}T12:00:00`)
+  const currentYear = now.getFullYear()
   const byYear: Record<number, YearData> = {}
 
   for (const year of allYears) {
@@ -340,16 +347,14 @@ export async function getGoalsPageData(): Promise<GoalsPageData> {
     const rawYearKm = activities
       .filter((a) => a.date.startsWith(String(year)))
       .reduce((sum, a) => sum + a.distanceKm, 0)
-    // Displayed / compared value uses the shared whole-km selector so Goals
-    // matches Progress and Analytics; the projection keeps the raw sum.
     const totalDistanceKm = yearDistanceKm(activities, year)
 
     const projection =
       year === currentYear && goals
-        ? computeProjection(activities, year, rawYearKm, goals)
+        ? computeProjection(activities, year, rawYearKm, goals, now)
         : null
 
-    const monthlyGoals = goals ? computeMonthlyGoals(activities, year, goals) : []
+    const monthlyGoals = goals ? computeMonthlyGoals(activities, year, goals, now, plannedByMonth) : []
 
     const nextRaceSpotlight =
       year === currentYear ? computeNextRaceSpotlight(upcomingRaces, predictions, today) : null
@@ -375,5 +380,7 @@ export async function getGoalsPageData(): Promise<GoalsPageData> {
     })
     .filter((outcome): outcome is YearOutcome => outcome !== null)
 
-  return { years: allYears, byYear, history }
+  const nextRace = nextRaceAcrossYears(upcomingRaceYears, currentYear, predictions, today)
+
+  return { years: allYears, byYear, history, nextRace }
 }
