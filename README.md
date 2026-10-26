@@ -8,11 +8,11 @@ ground. A Python pipeline synchronizes a personal Garmin history into a separate
 data repository. A fresh clone instead generates a deterministic, fictional season, so
 the whole app can be reviewed without an account, an API key or a database.
 
-[Live demo](https://runomics-demo.vercel.app/) · [Features](#features) · [Tech stack](#tech-stack) · [Architecture](#architecture)
+[Live demo](https://runomics-demo.adamelkadaoui.com/) · [Features](#features) · [Tech stack](#tech-stack) · [Architecture](#architecture)
 
 ## Live demo
 
-**[Open the live demo](https://runomics-demo.vercel.app/)**, best on a phone or in a
+**[Open the live demo](https://runomics-demo.adamelkadaoui.com/)**, best on a phone or in a
 narrow window: the app is designed for an iPhone's home screen. Every athlete, activity,
 shoe, race and route in it is generated; the routes are drawn in the open Pacific.
 
@@ -196,7 +196,7 @@ part of this repository. See [.env.example](.env.example) for the configuration 
 | Area | Technology |
 | --- | --- |
 | Web | Next.js 16, React 19, TypeScript |
-| UI | Tailwind CSS v4, Recharts, Lucide, next-themes |
+| UI | Tailwind CSS v4, hand-drawn SVG charts, Lucide, next-themes |
 | Maps | MapLibre GL, MapTiler, OpenRouteService |
 | Data processing | Python, Garmin Personal API, Garmin FIT SDK, Open-Meteo |
 | Optional services | Firebase, Gemini, Vercel Analytics and Speed Insights |
@@ -225,7 +225,7 @@ npm run screenshots:portfolio   # the six README images, at the iPhone 16 Pro's 
 ```
 
 The portfolio capture builds the demo dataset and shoots it in the dark theme with the
-default accent. Set `SCREENSHOT_BASE_URL=https://runomics-demo.vercel.app` to shoot the
+default accent. Set `SCREENSHOT_BASE_URL=https://runomics-demo.adamelkadaoui.com` to shoot the
 live demo instead. See [screenshots/README.md](screenshots/README.md) for the audit run.
 
 ## Project history
