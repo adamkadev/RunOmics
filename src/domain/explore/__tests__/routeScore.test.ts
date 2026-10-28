@@ -4,10 +4,12 @@ import {
   ROUTE_W_BUSY_ON,
   ROUTE_W_NEW_OFF,
   ROUTE_W_NEW_ON,
+  ROUTE_W_TRAFFIC,
   measureRoute,
   routeStart,
   scoreRoutes,
 } from '../routeScore'
+import type { SessionDay } from '../climbBudget'
 import type { RouteCandidate, RoutePreferences } from '../types'
 import { projectX, projectY } from '../grid'
 import { PROJ, areaFile, at, cells, rect, testArea, unit } from './areaFixture'
@@ -18,19 +20,30 @@ const visited: ReadonlySet<number> = new Set(cells(0, 7, 0, 0))
 
 const OFF: RoutePreferences = { avoidBusyRoads: false, newStreetsFirst: false, flatForReps: false }
 
+type Ranges = [number, number, number][]
+
 function candidate(
   seed: number,
   pointsM: [number, number][],
-  { distanceM = 1200, waytypes = [] as [number, number, number][], ele = false } = {},
+  {
+    distanceM = 1200,
+    waytypes = [] as Ranges,
+    surfaces = [] as Ranges,
+    steepness = [] as Ranges,
+    ascentM = null as number | null,
+    ele = false,
+  } = {},
 ): RouteCandidate {
   return {
     seed,
     coordinates: pointsM.map(([x, y], k) => (ele ? [...at(x, y), 200 + k] : at(x, y))),
     distanceM,
     durationS: distanceM / 3,
-    ascentM: null,
+    ascentM,
     descentM: null,
     waytypes,
+    surfaces,
+    steepness,
   }
 }
 
@@ -80,7 +93,38 @@ describe('measureRoute', () => {
   })
 
   it('measures an empty route as nothing', () => {
-    expect(measureRoute(index, visited, candidate(5, []))).toEqual({ lengthM: 0, newShare: 0, busyShare: 0, trafficFreeShare: 0, newSteps: [] })
+    expect(measureRoute(index, visited, candidate(5, []))).toEqual({
+      lengthM: 0,
+      newShare: 0,
+      busyShare: 0,
+      trafficFreeShare: 0,
+      trailShare: 0,
+      steepUpShare: 0,
+      steepDownShare: 0,
+      steepClimbM: 0,
+      newSteps: [],
+    })
+  })
+
+  it('counts paths and tracks without a paved surface, soft ground anywhere and steps as trail', () => {
+    const trail = (waytype: number, surface: number) => measureRoute(index, visited, known(1, { waytypes: [[0, 2, waytype]], surfaces: [[0, 2, surface]] })).trailShare
+
+    expect(trail(4, 0)).toBe(1)
+    expect(trail(5, 12)).toBe(1)
+    expect(trail(7, 17)).toBe(1)
+    expect(trail(8, 3)).toBe(1)
+    expect(trail(5, 10)).toBe(0.5)
+    expect(trail(4, 3)).toBe(0)
+    expect(trail(7, 0)).toBe(0)
+    expect(trail(3, 0)).toBe(0)
+  })
+
+  it('measures steep climbs and descents from 7 %, in full from 10 %', () => {
+    const measure = measureRoute(index, visited, known(1, { steepness: [[0, 1, 4], [1, 2, -3]] }))
+
+    expect(measure.steepUpShare).toBeCloseTo(0.5, 9)
+    expect(measure.steepDownShare).toBeCloseTo(0.25, 9)
+    expect(measure.steepClimbM).toBeCloseTo(600, 6)
   })
 })
 
@@ -113,7 +157,7 @@ describe('scoreRoutes', () => {
 
   it('lets the toggles change the order', () => {
     const newButBusy = fresh(1, { distanceM: 1200, waytypes: [[0, 2, 1]] })
-    const knownAndQuiet = known(2, { distanceM: 1200, waytypes: [[0, 2, 4]] })
+    const knownAndQuiet = known(2, { distanceM: 1200, waytypes: [[0, 2, 7]] })
     const order = (prefs: RoutePreferences) =>
       scoreRoutes(index, visited, [newButBusy, knownAndQuiet], 1200, prefs).map((r) => r.candidate.seed)
 
@@ -126,13 +170,54 @@ describe('scoreRoutes', () => {
   it('with Flat for the reps, puts a flat loop on paths before a hilly one on streets', () => {
     const hillyStreets = fresh(1, { distanceM: 1200, waytypes: [[0, 2, 3]] })
     const flatPaths = known(2, { distanceM: 1200, waytypes: [[0, 2, 7]] })
-    hillyStreets.ascentM = 30
+    hillyStreets.ascentM = 12
     flatPaths.ascentM = 2
     const order = (flatForReps: boolean) =>
       scoreRoutes(index, visited, [hillyStreets, flatPaths], 1200, { avoidBusyRoads: false, newStreetsFirst: false, flatForReps }).map((r) => r.candidate.seed)
 
     expect(order(false)).toEqual([1, 2])
     expect(order(true)).toEqual([2, 1])
+  })
+
+  it('puts a new loop on muddy forest tracks before a known street one in daylight, on any day, and after it in the dark', () => {
+    const muddy = fresh(1, { waytypes: [[0, 2, 5]], surfaces: [[0, 2, 12]] })
+    const streets = known(2, { waytypes: [[0, 2, 3]], surfaces: [[0, 2, 3]] })
+    const order = (day: SessionDay, dark = false) =>
+      scoreRoutes(index, visited, [muddy, streets], 1200, { ...OFF, newStreetsFirst: true }, { day, dark }).map((r) => r.candidate.seed)
+
+    expect(order({ session: 'easy', beforeQuality: false })).toEqual([1, 2])
+    expect(order({ session: 'easy', beforeQuality: true })).toEqual([1, 2])
+    expect(order({ session: 'quality', beforeQuality: false })).toEqual([1, 2])
+    expect(order({ session: 'easy', beforeQuality: false }, true)).toEqual([2, 1])
+  })
+
+  it('ignores a trailsOk field from an older client', () => {
+    const muddy = fresh(1, { waytypes: [[0, 2, 5]], surfaces: [[0, 2, 12]] })
+    const stale = { ...OFF, trailsOk: false } as RoutePreferences
+
+    expect(scoreRoutes(index, visited, [muddy], 1200, stale)[0]!.score).toBe(scoreRoutes(index, visited, [muddy], 1200, OFF)[0]!.score)
+  })
+
+  it('with Flat for the reps, counts a path as traffic-free only when it is paved', () => {
+    const unpaved = known(1, { waytypes: [[0, 2, 4]] })
+    const paved = known(2, { waytypes: [[0, 2, 4]], surfaces: [[0, 2, 3]] })
+    const [first, second] = scoreRoutes(index, visited, [unpaved, paved], 1200, { ...OFF, flatForReps: true })
+
+    expect(first!.candidate.seed).toBe(2)
+    expect(second!.score - first!.score).toBeCloseTo(ROUTE_W_TRAFFIC, 9)
+  })
+
+  it('puts a loop over the day’s climb budget behind one inside it with less new ground', () => {
+    const hilly = fresh(1, { ascentM: 36 })
+    const rolling = known(2, { ascentM: 12 })
+    const order = (session: 'easy' | 'recovery') =>
+      scoreRoutes(index, visited, [hilly, rolling], 1200, { ...OFF, newStreetsFirst: true }, { day: { session, beforeQuality: false }, dark: false }).map(
+        (r) => r.candidate.seed,
+      )
+
+    expect(order('easy')).toEqual([2, 1])
+    expect(scoreRoutes(index, visited, [fresh(1, { ascentM: 22 }), rolling], 1200, { ...OFF, newStreetsFirst: true }).map((r) => r.candidate.seed)).toEqual([1, 2])
+    expect(order('recovery')).toEqual([2, 1])
   })
 
   it('keeps the lower seed first on a tie', () => {
@@ -170,6 +255,16 @@ describe('routeStart', () => {
 
   it('is the centre of the runnable cell nearest the label', () => {
     expectAt(routeStart(area, 'test-r'), 525, 525)
+  })
+
+  it('moves off a cell under a spot to the nearest clear one', () => {
+    const start = routeStart(area, 'test-r', [[...at(525, 525), 40]])!
+    const metres = Math.hypot(projectX(PROJ, start[0]) - 525, projectY(PROJ, start[1]) - 525)
+    expect(metres).toBeCloseTo(150, 6)
+  })
+
+  it('keeps the nearest cell when every cell is under a spot', () => {
+    expectAt(routeStart(area, 'test-r', [[...at(300, 300), 250]]), 525, 525)
   })
 
   it('skips the cells without a way, even the one holding the label', () => {

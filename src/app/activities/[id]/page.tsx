@@ -8,10 +8,9 @@ import { getShoeRegistry } from '@/infrastructure/repositories/JsonShoeRepositor
 import { getOfficialRaceResults } from '@/infrastructure/repositories/JsonRaceResultRepository'
 import { officialResultsByActivityId } from '@/domain/activity/raceResult'
 import { ActivityDetailClient } from '@/components/activity/ActivityDetailClient'
-import { activityDetailView, runName, shareActivity, shareSession, shownType } from '@/components/activity/activityViews'
+import { activityDetailView, runName, shareActivity, shownType } from '@/components/activity/activityViews'
 import { ActivityNav } from '@/components/activity/ActivityNav'
 import { ShareButton } from '@/components/activity/ShareButton'
-import { ActivityAchievements } from '@/components/activity/ActivityAchievements'
 import { OfficialResult } from '@/components/activity/OfficialResult'
 import { NewGround } from '@/components/activity/NewGround'
 import { getRunExploreGain } from '@/application/usecases/GetExploreGains'
@@ -21,7 +20,8 @@ import { getRunVerdictInsight } from '@/application/usecases/GetRunVerdictInsigh
 import { getAthleteProfile } from '@/infrastructure/repositories/JsonAthleteRepository'
 import { getPlannedWorkouts } from '@/application/usecases/GetPlannedWorkouts'
 import { getRunSessions } from '@/application/coaching/GetCoachingView'
-import { controlledRunView } from '@/application/coaching/GetCoachReadout'
+import { sessionForRun } from '@/domain/coaching/sessionForRun'
+import { controlledRunView } from '@/application/coaching/controlledRunView'
 import { ControlledThresholdCard } from '@/components/activity/ControlledThresholdCard'
 import { sessionLabel } from '@/lib/activityTitle'
 import { getTrainingZones } from '@/application/usecases/GetTrainingZones'
@@ -45,7 +45,7 @@ export async function generateMetadata({ params }: { params: Promise<{ id: strin
   const activity = getActivities().find((a) => a.id === id)
   if (!activity) return { title: t.activity.metaFallbackTitle }
 
-  const name = runName(activity, shareSession(runSessions(), activity))
+  const name = runName(activity, sessionForRun(activity, runSessions()))
   const stats = [
     formatDistance(activity.distanceKm),
     formatDuration(activity.durationSeconds),
@@ -89,11 +89,17 @@ export default async function ActivityDetailPage({
   const aiVerdict = await getRunVerdictInsight(activity)
   const officialResult = officialResultsByActivityId(getOfficialRaceResults()).get(id) ?? null
   const holdsOfficialRecord = records.some((record) => record.official && record.activityId === id)
-  const registeredShoe = activity.gearId ? getShoeRegistry()[activity.gearId] : undefined
+  const shoeRegistry = getShoeRegistry()
+  const registeredShoe = activity.gearId ? shoeRegistry[activity.gearId] : undefined
+  const shoeOptions = Object.entries(shoeRegistry)
+    .filter(([gearId, info]) => !info.retired || gearId === activity.gearId)
+    .map(([gearId, info]) => ({ gearId, name: info.name, dotColor: info.dotColor }))
   const newGround = getRunExploreGain(id)
-  const shoe = registeredShoe ? { name: registeredShoe.name, dotColor: registeredShoe.dotColor } : null
+  const shoe = registeredShoe && activity.gearId
+    ? { gearId: activity.gearId, name: registeredShoe.name, dotColor: registeredShoe.dotColor, source: activity.gearSource }
+    : null
   // The coach's session this run was, for its name in the header and on the share card, and its reps' target pace.
-  const session = shareSession(runSessions(), activity)
+  const session = sessionForRun(activity, runSessions())
   const controlledRun = controlledRunView(activity, session)
   // The watch's own plan for the day, for a rep target the coach never matched.
   const plannedForDay = (await getPlannedWorkouts()).find((w) => w.date === activity.date.slice(0, 10)) ?? null
@@ -119,9 +125,10 @@ export default async function ActivityDetailPage({
         share={<ShareButton activity={shareActivity(activity, session, aiVerdict, plannedForDay)} />}
         dynamicsBaseline={getDynamicsBaseline(activity)}
         shoe={shoe}
+        shoeOptions={shoeOptions}
         similarRuns={similarRuns}
         extras={
-          officialResult || activity.bestEfforts || newGround || controlledRun ? (
+          officialResult || newGround || controlledRun ? (
             <>
               {controlledRun && <ControlledThresholdCard view={controlledRun} />}
               {officialResult && (
@@ -132,16 +139,12 @@ export default async function ActivityDetailPage({
                   isPersonalBest={holdsOfficialRecord}
                 />
               )}
-              {activity.bestEfforts && (
-                <ActivityAchievements bestEfforts={activity.bestEfforts} qualifiedEfforts={qualifiedEfforts} />
-              )}
               {newGround && <NewGround gain={newGround} />}
             </>
           ) : null
         }
+        footer={<ActivityNav prev={prevActivity} next={nextActivity} />}
       />
-
-      <ActivityNav prev={prevActivity} next={nextActivity} />
     </div>
   )
 }

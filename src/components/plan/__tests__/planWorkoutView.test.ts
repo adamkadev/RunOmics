@@ -30,12 +30,49 @@ function recovery(overrides: Partial<WorkoutPrescription> = {}): WorkoutPrescrip
   })
 }
 
-function viewOf(prescription: WorkoutPrescription, garminPlanned: PlannedWorkout[] = []): PrescriptionView {
+function viewOf(prescription: WorkoutPrescription): PrescriptionView {
   const coachingPlan: CoachingPlan = plan()
   coachingPlan.weeks[0]!.workouts = [prescription]
   coachingPlan.weeks[1]!.workouts = []
-  return buildCoachingOverview(coachingPlan, [], [], [], garminPlanned, '2026-09-09').workouts[0]!
+  return buildCoachingOverview(coachingPlan, [], [], '2026-09-09').workouts[0]!
 }
+
+describe('a session’s distance on Plan and Today', () => {
+  const fourthOfNovember = workout({
+    id: 'workout-return',
+    type: 'easy',
+    totalDurationSeconds: undefined,
+    blocks: [
+      { kind: 'warmup', target: { durationSeconds: 300 } },
+      { kind: 'effort', target: { durationSeconds: 900, paceSecPerKm: { min: 470, max: 525 } } },
+      { kind: 'cooldown', target: { durationSeconds: 300 } },
+    ],
+  })
+
+  function overviewOf(prescription: WorkoutPrescription, easyPace?: { min: number; max: number } | null): PrescriptionView {
+    const coachingPlan: CoachingPlan = plan()
+    coachingPlan.weeks[0]!.workouts = [prescription]
+    coachingPlan.weeks[1]!.workouts = []
+    return buildCoachingOverview(coachingPlan, [], [], '2026-09-09', easyPace).workouts[0]!
+  }
+
+  it('runs the untargeted warm-up and cool-down at the athlete’s easy pace zone', () => {
+    const view = overviewOf(fourthOfNovember, { min: ZONES.zones[0]!.paceMinSecPerKm, max: ZONES.zones[0]!.paceMaxSecPerKm })
+    expect(coachWorkoutView(view, ZONES).distanceM).toBe(Math.round(1_809 + (600 * 2_000) / (310 + 387)))
+  })
+
+  it('falls back to the plan’s own easy range without zones', () => {
+    expect(overviewOf(fourthOfNovember).distanceMeters).toBe(3_015)
+  })
+
+  it('counts nothing for a walk the notes name', () => {
+    const walked = workout({
+      ...fourthOfNovember,
+      blocks: fourthOfNovember.blocks.map((block) => (block.kind === 'effort' ? block : { ...block, notes: ['Marche active.'] })),
+    })
+    expect(overviewOf(walked).distanceMeters).toBe(1_809)
+  })
+})
 
 describe('coach prescriptions normalised into the Plan session view', () => {
   it('derives the duration of a session stated only as distance and pace', () => {
@@ -155,16 +192,10 @@ describe('coach prescriptions normalised into the Plan session view', () => {
 
   it('takes the time of day from a Garmin session matched to the prescription', () => {
     const garmin: PlannedWorkout = { date: '2026-09-09', name: 'Recovery', type: 'Base', scheduledTime: 'Evening' }
-    const view = coachWorkoutView(viewOf(recovery(), [garmin]), ZONES, garmin)
+    const view = coachWorkoutView(viewOf(recovery()), ZONES, garmin)
 
     expect(view.scheduledTime).toBe('Evening')
     expect(view.title).toBe('Post-Race Recovery Run')
-  })
-
-  it('reports the prescription state, not a generic planned label', () => {
-    expect(coachWorkoutView(viewOf(recovery()), ZONES).statusLabel).toBe(t.coaching.states.prescribed)
-    expect(coachWorkoutView(viewOf(recovery({ status: 'adjusted' })), ZONES).statusLabel)
-      .toBe(t.coaching.states.adjusted)
   })
 })
 
@@ -242,10 +273,8 @@ describe('a Garmin planned workout is untouched by any of this', () => {
     expect(view.duration).toEqual({ seconds: 3_600, estimated: false })
     expect(view.distanceM).toBe(12_000)
     expect(view.scheduledTime).toBe('Morning')
-    expect(view.statusLabel).toBe(t.plan.planned)
     expect(view.description).toBeNull()
     expect(view.notes).toEqual([])
-    expect(view.alert).toBeNull()
     expect(view.target).toBeNull()
     expect(view.effort).toBe('Threshold · 4:20-4:30 /km')
   })

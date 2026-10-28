@@ -1,23 +1,29 @@
 import type { NextConfig } from "next";
 import { readFileSync } from "node:fs";
 import bundleAnalyzer from "@next/bundle-analyzer";
+import { assertNoTestFlagsOnDeployment } from "./src/lib/testOnlyFlags";
 
 const { version } = JSON.parse(readFileSync("./package.json", "utf8")) as { version: string };
 
-// Set only by the screenshot build, whose emulator sign-in needs an iframe and fetches.
+assertNoTestFlagsOnDeployment(process.env);
+
+// Set only by the e2e and screenshot builds, whose emulator sign-in needs an iframe and fetches.
 const authEmulator = process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST
   ? ` http://${process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST}`
+  : "";
+const firestoreEmulator = process.env.NEXT_PUBLIC_FIRESTORE_EMULATOR_HOST
+  ? ` http://${process.env.NEXT_PUBLIC_FIRESTORE_EMULATOR_HOST}`
   : "";
 
 const csp = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline' https://www.gstatic.com https://apis.google.com${
+  `script-src 'self' 'unsafe-inline' https://apis.google.com${
     process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""
   }`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://api.maptiler.com",
   "font-src 'self' data:",
-  `connect-src 'self' https://api.maptiler.com https://nominatim.openstreetmap.org https://*.googleapis.com https://apis.google.com${authEmulator}`,
+  `connect-src 'self' https://api.maptiler.com https://nominatim.openstreetmap.org https://*.googleapis.com https://apis.google.com${authEmulator}${firestoreEmulator}`,
   "worker-src 'self' blob:",
   `frame-src https://*.firebaseapp.com https://accounts.google.com https://apis.google.com${authEmulator}`,
   "object-src 'none'",
@@ -27,13 +33,14 @@ const csp = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
+  // The sparse e2e build sits beside the default one, which keeps serving while it builds.
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
     NEXT_PUBLIC_BUILD_COMMIT: (process.env.VERCEL_GIT_COMMIT_SHA ?? "").slice(0, 7) || "local",
   },
-  outputFileTracingIncludes: {
-    "/**": ["./data/**/*"],
-  },
+  // Reading GitHub at run time, a function never opens ./data (dataFs throws first), so it ships without the copy.
+  ...(process.env.RUNOMICS_DATA_SOURCE === "github" ? {} : { outputFileTracingIncludes: { "/**": ["./data/**/*"] } }),
   // A config redirect, not a page calling redirect(): the client router's redirect lands before the URL shows ?tab=.
   async redirects() {
     return [{ source: "/milestones", destination: "/records?tab=milestones", permanent: false }];

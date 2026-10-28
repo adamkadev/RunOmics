@@ -1,4 +1,4 @@
-import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
+import { getActivitiesWithEffectiveTypes } from '@/application/coaching/GetCoachingView'
 import { getShoeRegistry } from '@/infrastructure/repositories/JsonShoeRepository'
 import type { ActivityType } from '@/domain/activity/types'
 import { kmPerWeek as computeKmPerWeek, wearPercent } from '@/domain/shoe/wearStatus'
@@ -25,7 +25,7 @@ export function getShoeDetail(gearId: string): ShoeDetail | null {
   const registered = getShoeRegistry()[gearId]
   if (!registered) return null
 
-  const activities = getAllActivities()
+  const activities = getActivitiesWithEffectiveTypes()
     .filter((a) => a.gearId === gearId)
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
 
@@ -37,7 +37,7 @@ export function getShoeDetail(gearId: string): ShoeDetail | null {
   const avgPaceSecPerKm = mean(activities.map((a) => a.paceSecPerKm))
   const avgHeartRate = mean(activities.map((a) => a.avgHeartRate))
 
-  // By distance, not session count, as TypeDistribution splits a type mix.
+  // By distance, not session count, so one long run outweighs two short ones.
   const bucketDistance: Record<ShoeTypeBucket, number> = { base: 0, tempo: 0, threshold: 0, intervals: 0 }
   for (const a of activities) bucketDistance[typeBucket(a.type)] += a.distanceKm
   const share = (bucket: ShoeTypeBucket) => (totalKm === 0 ? 0 : Math.round((bucketDistance[bucket] / totalKm) * 100))

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from processing.activity_type import infer_type_with_source
+from processing.activity_type import TypeContext, infer_type_with_source
 from processing.fit_parser import ActivitySplit, ParsedFit, SplitLap  # noqa: F401
 
 _MAX_CHART_POINTS = 150
@@ -43,7 +44,6 @@ class ActivityData:
     avg_heart_rate: int | None
     rpe: int | None
     comment: str
-    polyline: str | None
     route: list[list[float]] | None
     elevation_gain: float | None
     aer_training_effect: float | None
@@ -70,6 +70,10 @@ class ActivityData:
     duration_bests: dict[str, float] | None = None
     gap_sec_per_km: float | None = None
     gap_samples: list[int] | None = None
+    hr_source: str | None = None
+    longest_continuous_run_sec: int | None = None
+    longest_continuous_run_m: float | None = None
+    running_sec: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,9 +91,9 @@ class ActivityData:
             "paceSecPerKm": self.pace_sec_per_km,
             "hrZones": [z.to_dict() for z in self.hr_zones],
             "avgHeartRate": self.avg_heart_rate,
+            "hrSource": self.hr_source,
             "rpe": self.rpe,
             "comment": self.comment,
-            "polyline": self.polyline,
             "route": self.route,
             "elevationGain": self.elevation_gain,
             "aerTrainingEffect": self.aer_training_effect,
@@ -110,6 +114,9 @@ class ActivityData:
             "vo2maxGarmin": self.vo2max_garmin,
             "avgTemperature": self.avg_temperature,
             "cadenceSamples": self.cadence_samples,
+            "longestContinuousRunSec": self.longest_continuous_run_sec,
+            "longestContinuousRunM": self.longest_continuous_run_m,
+            "runningSec": self.running_sec,
             "splits": [s.to_dict() for s in self.splits] if self.splits else None,
             "gearId": self.gear_id,
             "weather": self.weather,
@@ -151,10 +158,85 @@ def grade_adjusted(parsed: ParsedFit | None, pace_sec_per_km: float | None) -> t
     return round(pace_sec_per_km / parsed.gap_factor, 1), samples
 
 
+def fit_derived_fields(parsed: ParsedFit | None, pace_sec_per_km: float | None) -> dict[str, Any]:
+    """The ActivityData fields read from the FIT alone; route and elevation_gain only when the file holds them."""
+    if not parsed:
+        return dict.fromkeys(_FIT_FIELDS)
+
+    def chart(samples: list) -> list | None:
+        return _decimate_list(samples, _MAX_CHART_POINTS) if samples else None
+
+    def te(value: float | None) -> float | None:
+        return round(value, 1) if value is not None else None
+
+    gap_sec_per_km, gap_samples = grade_adjusted(parsed, pace_sec_per_km)
+    fields: dict[str, Any] = {
+        "aer_training_effect": te(parsed.aer_training_effect),
+        "ana_training_effect": te(parsed.ana_training_effect),
+        "hr_samples": chart(parsed.heart_rates),
+        "elevation_profile": chart(parsed.elevation_samples),
+        "calories": parsed.calories,
+        "cadence_spm": parsed.cadence_spm,
+        "ground_contact_ms": parsed.ground_contact_ms,
+        "vertical_oscillation_mm": parsed.vertical_oscillation_mm,
+        "vertical_ratio_pct": parsed.vertical_ratio_pct,
+        "stride_length_m": parsed.stride_length_m,
+        "best_efforts": parsed.best_efforts or None,
+        "duration_bests": parsed.duration_bests or None,
+        "pace_samples": chart(parsed.pace_samples),
+        "vo2max_garmin": parsed.vo2max_garmin,
+        "avg_temperature": parsed.avg_temperature,
+        "cadence_samples": chart(parsed.cadence_samples),
+        "splits": parsed.splits or None,
+        "gap_sec_per_km": gap_sec_per_km,
+        "gap_samples": gap_samples,
+        "hr_source": parsed.hr_source,
+        "longest_continuous_run_sec": parsed.longest_continuous_run_sec,
+        "longest_continuous_run_m": parsed.longest_continuous_run_m,
+        "running_sec": parsed.running_sec,
+    }
+    if parsed.route:
+        fields["route"] = parsed.route
+    if parsed.elevation_gain_m > 0:
+        fields["elevation_gain"] = parsed.elevation_gain_m
+    return fields
+
+
+_FIT_FIELDS = (
+    "aer_training_effect", "ana_training_effect", "hr_samples", "elevation_profile", "calories", "cadence_spm",
+    "ground_contact_ms", "vertical_oscillation_mm", "vertical_ratio_pct", "stride_length_m", "best_efforts",
+    "duration_bests", "pace_samples", "vo2max_garmin", "avg_temperature", "cadence_samples", "splits",
+    "gap_sec_per_km", "gap_samples", "hr_source", "longest_continuous_run_sec", "longest_continuous_run_m",
+    "running_sec",
+)
+
+
+def stored_fit_fields(parsed: ParsedFit, pace_sec_per_km: float | None) -> dict[str, Any]:
+    """fit_derived_fields under the keys and in the JSON form activities are stored with."""
+    stored = {
+        re.sub(r"_(\w)", lambda m: m.group(1).upper(), key): value
+        for key, value in fit_derived_fields(parsed, pace_sec_per_km).items()
+    }
+    if stored["splits"]:
+        stored["splits"] = [split.to_dict() for split in stored["splits"]]
+    return stored
+
+
 def extract_gear_id(gear_list: list[dict[str, Any]] | None) -> str | None:
     if not gear_list:
         return None
     return gear_list[0].get("uuid")
+
+
+def clean_activity_name(raw: str | None) -> str:
+    name = raw or ""
+    # Garmin auto-names: "<City> - Morning Run" → "Morning Run"
+    if " - " in name:
+        name = name.split(" - ", 1)[1]
+    # Drop trailing extras: "40 min footing + renforcement" → "40 min footing"
+    if " + " in name:
+        name = name.split(" + ", 1)[0]
+    return name.strip()
 
 
 def map_activity(
@@ -165,6 +247,7 @@ def map_activity(
     file_name: str | None = None,
     gear: list[dict[str, Any]] | None = None,
     weather: dict[str, Any] | None = None,
+    type_context: TypeContext | None = None,
 ) -> ActivityData:
     summary: dict[str, Any] = garmin_activity.get("summaryDTO") or {}
 
@@ -178,14 +261,7 @@ def map_activity(
         return None
 
     activity_id = str(garmin_activity.get("activityId", ""))
-    name: str = garmin_activity.get("activityName", "") or ""
-    # Garmin auto-names: "<City> - Morning Run" → "Morning Run"
-    if " - " in name:
-        name = name.split(" - ", 1)[1]
-    # Drop trailing extras: "40 min footing + renforcement" → "40 min footing"
-    if " + " in name:
-        name = name.split(" + ", 1)[0]
-    name = name.strip()
+    name = clean_activity_name(garmin_activity.get("activityName"))
 
     if parsed and parsed.start_time_local:
         dt = parsed.start_time_local
@@ -210,19 +286,20 @@ def map_activity(
     type_inference = infer_type_with_source(
         name,
         parsed,
+        activity_id=activity_id,
         hr_zones=hr_zones or [],
         duration_seconds=duration_seconds,
+        date=date_str,
+        context=type_context,
     )
 
     avg_hr_raw = (parsed.avg_heart_rate if parsed else None) or api("averageHR", "avgHr")
     avg_heart_rate: int | None = int(avg_hr_raw) if avg_hr_raw else None
 
-    route = parsed.route if parsed and parsed.route else None
-
-    elevation_gain: float | None = None
-    if parsed and parsed.elevation_gain_m > 0:
-        elevation_gain = parsed.elevation_gain_m
-    else:
+    derived = fit_derived_fields(parsed, pace_sec_per_km)
+    route = derived.pop("route", None)
+    elevation_gain: float | None = derived.pop("elevation_gain", None)
+    if elevation_gain is None:
         raw_elev = api("elevationGain")
         if raw_elev:
             elevation_gain = round(float(raw_elev), 1)
@@ -233,22 +310,6 @@ def map_activity(
         if api_rpe:
             api_rpe = int(api_rpe)
             rpe = max(1, min(10, round(api_rpe / 10) if api_rpe > 10 else api_rpe))
-
-    hr_samples: list[int] | None = None
-    elevation_profile: list[float] | None = None
-    pace_samples: list[float] | None = None
-    cadence_samples: list[float] | None = None
-    if parsed:
-        if parsed.heart_rates:
-            hr_samples = _decimate_list(parsed.heart_rates, _MAX_CHART_POINTS)
-        if parsed.elevation_samples:
-            elevation_profile = _decimate_list(parsed.elevation_samples, _MAX_CHART_POINTS)
-        if parsed.pace_samples:
-            pace_samples = _decimate_list(parsed.pace_samples, _MAX_CHART_POINTS)
-        if parsed.cadence_samples:
-            cadence_samples = _decimate_list(parsed.cadence_samples, _MAX_CHART_POINTS)
-
-    gap_sec_per_km, gap_samples = grade_adjusted(parsed, pace_sec_per_km)
 
     return ActivityData(
         sport=(api("activityType", "activityTypeDTO") or {}).get("typeKey"),
@@ -265,32 +326,13 @@ def map_activity(
         avg_heart_rate=avg_heart_rate,
         rpe=rpe,
         comment="",
-        polyline=None,
         route=route,
         elevation_gain=elevation_gain,
-        aer_training_effect=round(parsed.aer_training_effect, 1) if parsed and parsed.aer_training_effect is not None else None,
-        ana_training_effect=round(parsed.ana_training_effect, 1) if parsed and parsed.ana_training_effect is not None else None,
-        hr_samples=hr_samples,
-        elevation_profile=elevation_profile,
-        calories=parsed.calories if parsed else None,
-        cadence_spm=parsed.cadence_spm if parsed else None,
-        ground_contact_ms=parsed.ground_contact_ms if parsed else None,
-        vertical_oscillation_mm=parsed.vertical_oscillation_mm if parsed else None,
-        vertical_ratio_pct=parsed.vertical_ratio_pct if parsed else None,
-        stride_length_m=parsed.stride_length_m if parsed else None,
-        best_efforts=(parsed.best_efforts or None) if parsed else None,
-        pace_samples=pace_samples,
-        vo2max_garmin=parsed.vo2max_garmin if parsed else None,
-        avg_temperature=parsed.avg_temperature if parsed else None,
-        cadence_samples=cadence_samples,
-        splits=parsed.splits if parsed and parsed.splits else None,
         gear_id=extract_gear_id(gear),
         weather=weather,
         type_source=type_inference.source,
         start_time_local=dt.strftime(_LOCAL_START_FORMAT),
-        duration_bests=(parsed.duration_bests or None) if parsed else None,
-        gap_sec_per_km=gap_sec_per_km,
-        gap_samples=gap_samples,
+        **derived,
     )
 
 

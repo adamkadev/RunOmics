@@ -1,4 +1,4 @@
-import { getAthleteProfile } from '@/infrastructure/repositories/JsonAthleteRepository'
+import { getAthleteProfile } from '@/application/usecases/GetAthleteProfile'
 import { getDashboardData } from '@/application/usecases/GetDashboardData'
 import { getLastSyncedAt } from '@/application/usecases/GetSyncStatus'
 import { getTrainingStatus } from '@/application/usecases/GetTrainingStatus'
@@ -22,6 +22,7 @@ import { TodayBoard } from '@/components/dashboard/TodayBoard'
 import { Vo2GradeTodayRow } from '@/components/dashboard/Vo2GradeTodayRow'
 import { ThisWeekCard } from '@/components/dashboard/ThisWeekCard'
 import { CelebrationOverlay } from '@/components/dashboard/CelebrationOverlay'
+import { getReturnProgress } from '@/application/usecases/GetReturnProgress'
 import { findNextSession, sessionCard } from '@/components/dashboard/nextSession'
 import { plannedSessionKinds } from '@/components/dashboard/weekStrip'
 import { sessionHrCapBpm } from '@/domain/training/hrTarget'
@@ -35,7 +36,7 @@ export default async function DashboardPage() {
   await loadData()
   // One date for the whole render, in the athlete's zone when one is set: the server's UTC date is off around midnight.
   const today = appTodayIso()
-  const data = getDashboardData(today)
+  const data = getDashboardData()
   const athlete = getAthleteProfile()
   const lastSyncedAt = getLastSyncedAt()
   const trainingStatus = await getTrainingStatus()
@@ -74,17 +75,18 @@ export default async function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-3">
-      <CelebrationOverlay record={mostRecentRecord} aiTake={celebrationTake} />
+      <CelebrationOverlay record={mostRecentRecord} milestone={getReturnProgress(today)?.milestones.at(-1) ?? null} aiTake={celebrationTake} />
 
       <DashboardGreeting name={athlete.displayName} lastSyncedAt={lastSyncedAt} today={today} />
       <StaleSyncBanner lastSyncedAt={lastSyncedAt} />
 
       <ReadinessCard status={trainingStatus} verdict={aiVerdict} load={recentLoad?.reading ?? null} today={today} />
       <TodayBoard session={card && { ...card, heat }} />
-      <CheckInCard today={today} />
-      <Vo2GradeTodayRow view={getVo2Grade(today)} />
+      <CheckInCard today={today}>
+        <Vo2GradeTodayRow view={getVo2Grade(today)} />
 
-      <ThisWeekCard target={weekTarget} today={today} sessionKinds={sessionKinds} load={recentLoad?.reading ?? null} />
+        <ThisWeekCard target={weekTarget} today={today} sessionKinds={sessionKinds} load={recentLoad?.reading ?? null} />
+      </CheckInCard>
     </div>
   )
 }

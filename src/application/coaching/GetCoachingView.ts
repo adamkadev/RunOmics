@@ -1,53 +1,50 @@
 import type { Activity } from '@/domain/activity/types'
-import {
-  COACHING_TO_ACTIVITY_TYPE,
-  type CoachDecision,
-  type CoachingPlan,
-  type GarminScheduleStatus,
-  type WorkoutEvaluation,
-  type WorkoutPrescription,
-} from '@/domain/coaching/types'
-import { garminScheduleStatus } from '@/domain/coaching/matching'
+import { withEffectiveTypes } from '@/domain/activity/effectiveType'
+import { sessionForRun, sessionsAcrossPlans, type RunSession } from '@/domain/coaching/sessionForRun'
+import type { CoachingPlan, NumberRange, WorkoutEvaluation, WorkoutPrescription } from '@/domain/coaching/types'
+import { planEasyPace, prescriptionMeters } from '@/domain/coaching/sessionDistance'
+import { trainingZonesOn } from '@/application/usecases/GetTrainingZones'
 import type { CoachingRepository } from '@/application/ports/CoachingRepository'
 import { appTodayIso } from '@/lib/calendarDate'
 import { JsonCoachingRepository } from '@/infrastructure/repositories/JsonCoachingRepository'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
-import { getAllPlannedWorkouts } from '@/infrastructure/repositories/JsonPlannedWorkoutRepository'
 
 export type PrescriptionDisplayState = 'prescribed' | 'adjusted' | 'completed' | 'missed' | 'cancelled'
 
 export interface PrescriptionView {
   prescription: WorkoutPrescription
   state: PrescriptionDisplayState
-  garminStatus: GarminScheduleStatus
   activityId: string | null
+  /** Its untargeted warm-up, cool-down and recoveries counted at the athlete's easy pace, as Plan, Today and Analytics show it. */
+  distanceMeters: number | null
 }
 
 export interface CoachingOverview {
   plan: CoachingPlan
   currentWeekId: string | null
   workouts: PrescriptionView[]
-  latestDecision: CoachDecision | null
-  latestEvaluation: WorkoutEvaluation | null
-  nextKeyWorkout: PrescriptionView | null
 }
 
-function findCompletedActivity(prescription: WorkoutPrescription, evaluations: WorkoutEvaluation[], activities: Activity[]): Activity | null {
-  const evaluation = evaluations.find((candidate) => candidate.prescriptionId === prescription.id && candidate.matchStatus === 'matched')
-  if (evaluation) return activities.find((activity) => activity.id === evaluation.activityId) ?? null
-  return null
+function completedRuns(plan: CoachingPlan, evaluations: WorkoutEvaluation[], activities: Activity[]): Map<string, Activity> {
+  const sessions = sessionsAcrossPlans([plan], evaluations)
+  const runs = new Map<string, Activity>()
+  for (const activity of activities) {
+    const session = sessionForRun(activity, sessions)
+    if (session && !runs.has(session.id)) runs.set(session.id, activity)
+  }
+  return runs
 }
 
 export function buildCoachingOverview(
   plan: CoachingPlan,
-  decisions: CoachDecision[],
   evaluations: WorkoutEvaluation[],
   activities: Activity[],
-  plannedWorkouts: ReturnType<typeof getAllPlannedWorkouts>,
   today: string,
+  easyPace: NumberRange | null = planEasyPace(plan.weeks.flatMap((week) => week.workouts)),
 ): CoachingOverview {
+  const runs = completedRuns(plan, evaluations, activities)
   const views = plan.weeks.flatMap((week) => week.workouts).map((prescription): PrescriptionView => {
-    const activity = findCompletedActivity(prescription, evaluations, activities)
+    const activity = runs.get(prescription.id) ?? null
     const state: PrescriptionDisplayState = prescription.status === 'cancelled'
       ? 'cancelled'
       : activity
@@ -57,65 +54,27 @@ export function buildCoachingOverview(
           : prescription.status === 'adjusted'
             ? 'adjusted'
             : 'prescribed'
-    return {
-      prescription,
-      state,
-      garminStatus: garminScheduleStatus(prescription, plannedWorkouts.find((planned) => planned.date === prescription.date) ?? null),
-      activityId: activity?.id ?? null,
-    }
+    return { prescription, state, activityId: activity?.id ?? null, distanceMeters: prescriptionMeters(prescription, easyPace) }
   }).sort((a, b) => a.prescription.date.localeCompare(b.prescription.date))
 
   const currentWeek = plan.weeks.find((week) => today >= week.startDate && today <= week.endDate) ?? null
-  const latestDecision = decisions[0] ?? null
-  const latestEvaluation = evaluations[0] ?? null
-  // Key as the week view's quality days are: a long run is easy running, and a session already run is behind.
-  const nextKeyWorkout = views.find((view) =>
-    view.prescription.date >= today &&
-    view.state !== 'cancelled' &&
-    view.state !== 'completed' &&
-    COACHING_TO_ACTIVITY_TYPE[view.prescription.type] !== 'Base'
-  ) ?? null
-
-  return { plan, currentWeekId: currentWeek?.id ?? null, workouts: views, latestDecision, latestEvaluation, nextKeyWorkout }
+  return { plan, currentWeekId: currentWeek?.id ?? null, workouts: views }
 }
 
 // Both readers must date "today" by appTodayIso(), as their pages do, or they disagree on the day after local midnight.
 export function getCoachingOverview(
   today = appTodayIso(),
-  repository: Pick<CoachingRepository, 'getCurrentPlan' | 'getDecisions' | 'getEvaluations'> = new JsonCoachingRepository(),
+  repository: Pick<CoachingRepository, 'getCurrentPlan' | 'getEvaluations'> = new JsonCoachingRepository(),
 ): CoachingOverview | null {
   const plan = repository.getCurrentPlan()
   if (!plan) return null
-  return buildCoachingOverview(
-    plan,
-    repository.getDecisions(),
-    repository.getEvaluations(),
-    getAllActivities(),
-    getAllPlannedWorkouts(),
-    today,
-  )
+  return buildCoachingOverview(plan, repository.getEvaluations(), getAllActivities(), today, easyPaceFor(plan, today))
 }
 
-export interface RunSession {
-  prescription: WorkoutPrescription
-  activityId: string | null
-}
-
-/** `plans` newest first; an older plan's session counts only on a day no newer plan's weeks cover. */
-export function sessionsAcrossPlans(plans: readonly CoachingPlan[], evaluations: WorkoutEvaluation[]): RunSession[] {
-  const matched = new Map(evaluations
-    .filter((evaluation) => evaluation.matchStatus === 'matched' && evaluation.prescriptionId !== null)
-    .map((evaluation) => [evaluation.prescriptionId!, evaluation.activityId]))
-  const covered: { startDate: string; endDate: string }[] = []
-  const sessions: RunSession[] = []
-  for (const plan of plans) {
-    for (const prescription of plan.weeks.flatMap((week) => week.workouts)) {
-      if (covered.some((week) => prescription.date >= week.startDate && prescription.date <= week.endDate)) continue
-      sessions.push({ prescription, activityId: matched.get(prescription.id) ?? null })
-    }
-    covered.push(...plan.weeks)
-  }
-  return sessions
+/** The athlete's easy pace zone, else the span the plan itself gives easy running. */
+export function easyPaceFor(plan: CoachingPlan, today: string): NumberRange | null {
+  const easy = trainingZonesOn(today)?.zones.find((zone) => zone.key === 'easy')
+  return easy ? { min: easy.paceMinSecPerKm, max: easy.paceMaxSecPerKm } : planEasyPace(plan.weeks.flatMap((week) => week.workouts))
 }
 
 /** An archive that fails to parse costs only the superseded blocks, never the page. */
@@ -133,6 +92,17 @@ export function getRunSessions(
 ): RunSession[] {
   const current = repository.getCurrentPlan()
   return sessionsAcrossPlans([...(current ? [current] : []), ...archivedPlans(repository)], repository.getEvaluations())
+}
+
+/** Every run as Analytics and Shoes count it; an unreadable plan costs the coach's types, never the page. */
+export function getActivitiesWithEffectiveTypes(): Activity[] {
+  const activities = getAllActivities()
+  try {
+    return withEffectiveTypes(activities, getRunSessions())
+  } catch (error) {
+    console.error('[coaching] plan unreadable, runs keep their own types', error)
+    return activities
+  }
 }
 
 /** Reads the plan alone: the overview walks every week against every evaluation, too much for one row. */

@@ -1,17 +1,20 @@
 'use client'
-import { setDaySkipped, useSkippedDays } from '@/lib/skippedDays'
 
 import Link from 'next/link'
 import { Check, ChevronRight, MapPin } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { setDaySkipped, useSkippedDays } from '@/lib/skippedDays'
+import { useOwnerAuth } from '@/lib/useOwnerAuth'
+import { SKIP_REASONS, type SkipReason } from '@/domain/wellness/checkIn'
+import { Toast, useToast } from '@/components/ui/Toast'
 import type { PlanRun } from './planRun'
 import { sessionZone } from '@/lib/colors'
 import { sessionHrCapBpm } from '@/domain/training/hrTarget'
+import type { PlanFit } from '@/domain/training/planFit'
 import { sessionLabel } from '@/lib/activityTitle'
 import { formatClock, formatDurationWords, formatPace, formatPercent, formatPlannedKm, formatRanKm, formatWeekday } from '@/lib/formatters'
 import { t } from '@/i18n'
 import { ButtonLink } from '@/components/ui/Button'
-import type { PrescriptionDisplayState } from '@/application/coaching/GetCoachingView'
 import { exploreRouteHref, planRouteKm } from '@/components/explore/exploreHref'
 import { planPaceSecPerKm } from './planPace'
 import type { PlanWorkoutView } from './planWorkoutView'
@@ -23,19 +26,11 @@ const CARD = 'content-card rounded-[24px] bg-card shadow-[var(--card-edge)] p-4'
 
 const PROFILE_HEIGHT: Record<StepTone, number> = { ease: 14, recovery: 14, work: 44 }
 
-const STATE_CLASS: Record<PrescriptionDisplayState, string> = {
-  prescribed: 'text-muted-foreground',
-  adjusted: 'text-[var(--tone-caution)]',
-  completed: 'text-[var(--pos)]',
-  missed: 'text-[var(--warn)]',
-  cancelled: 'text-muted-foreground',
-}
-
 function Eyebrow({ date, kind }: { date: string; kind: DayKind | null }) {
   return (
     <p
       className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em]"
-      style={{ color: kind?.color ?? 'var(--muted-foreground)' }}
+      style={{ color: kind?.text ?? 'var(--muted-foreground)' }}
     >
       <span>{[formatWeekday(date, true), kind ? kindLabel(kind.type, kind.kind) : null].filter(Boolean).join(' · ')}</span>
     </p>
@@ -91,12 +86,7 @@ export function PlannedWorkoutCard({
 
   return (
     <section data-testid={`plan-workout-${workout.key}`} className={CARD}>
-      <div className="flex items-baseline justify-between gap-3">
-        <Eyebrow date={workout.date} kind={kind} />
-        <span className={`shrink-0 text-[11px] font-medium ${workout.state ? STATE_CLASS[workout.state] : 'text-muted-foreground'}`} data-testid="plan-status">
-          {workout.statusLabel}
-        </span>
-      </div>
+      <Eyebrow date={workout.date} kind={kind} />
       {structured ? (
         <>
           <Title>{title}</Title>
@@ -210,26 +200,59 @@ function Line({ label, children, testId }: { label: string; children: ReactNode;
   )
 }
 
-/** A skipped day is drawn as rest on Today and stops counting as missed. */
+/** A skipped day is drawn as rest on Today, Plan and the month, and stops counting as missed. */
 function MissedLine({ date }: { date: string }) {
-  const skipped = useSkippedDays().has(date)
+  const skipped = useSkippedDays().get(date) ?? null
+  const { isOwner } = useOwnerAuth()
+  const [choosing, setChoosing] = useState(false)
+  const { toast, leaving, showToast } = useToast()
   const s = t.plan.dayCard
+  const mark = (reason: SkipReason | null) => {
+    setChoosing(false)
+    setDaySkipped(date, reason).catch(() => showToast(t.settings.actions.error, false))
+  }
+  const action = 'ml-2 text-[13px] font-medium text-accent-text'
   return (
     <Line label={t.plan.dayCard.done} testId="done-line">
       {skipped ? (
-        <span className="font-semibold text-muted-foreground" data-testid="skipped-mark">{s.skipped}</span>
+        <span className="font-semibold text-muted-foreground" data-testid="skipped-mark">{s.skippedFor(s.skipReasons[skipped])}</span>
       ) : (
         <span className="font-semibold text-[var(--warn)]">{t.sessionState.missed}</span>
       )}
-      <button
-        type="button"
-        onClick={() => setDaySkipped(date, !skipped)}
-        className="ml-2 text-[13px] font-medium text-accent-text"
-        data-testid="skip-toggle"
-      >
-        {skipped ? s.undoSkip : s.markSkipped}
-      </button>
+      {isOwner && (skipped ? (
+        <button type="button" onClick={() => mark(null)} className={action} data-testid="skip-toggle">{s.undoSkip}</button>
+      ) : choosing ? (
+        SKIP_REASONS.map((reason) => (
+          <button key={reason} type="button" onClick={() => mark(reason)} className={action} data-testid={`skip-${reason}`}>
+            {s.skipReasons[reason]}
+          </button>
+        ))
+      ) : (
+        <button type="button" onClick={() => setChoosing(true)} className={action} data-testid="skip-toggle">{s.markSkipped}</button>
+      ))}
+      <Toast toast={toast} leaving={leaving} />
     </Line>
+  )
+}
+
+function FitMark({ fit }: { fit: PlanFit }) {
+  if (fit === 'asPlanned') {
+    return (
+      <Check
+        size={13}
+        strokeWidth={3}
+        role="img"
+        aria-label={t.plan.dayCard.asPlanned}
+        className="ml-1.5 inline-block shrink-0 align-[-2px] text-[var(--pos)]"
+        data-testid="plan-fit"
+        data-fit={fit}
+      />
+    )
+  }
+  return (
+    <span className="ml-1.5 text-[13px] font-medium text-[var(--tone-caution)]" data-testid="plan-fit" data-fit={fit}>
+      {t.plan.dayCard.fit[fit]}
+    </span>
   )
 }
 
@@ -239,7 +262,8 @@ export function DoneDayCard({
   title,
   planned,
   acts,
-  onPlan,
+  fit,
+  ranOn = null,
 }: {
   date: string
   kind: DayKind | null
@@ -247,7 +271,10 @@ export function DoneDayCard({
   /** "10 km · Easy run". */
   planned: string | null
   acts: PlanRun[]
-  onPlan: boolean
+  /** The day's runs against its session; null when nothing was planned. */
+  fit: PlanFit | null
+  /** The day the session was run instead, a day either side. */
+  ranOn?: string | null
 }) {
   const zone = sessionZone({ type: kind?.type })
   return (
@@ -258,10 +285,14 @@ export function DoneDayCard({
         <Line label={t.plan.dayCard.planned} testId="planned-line">
           {planned ?? <span className="text-muted-foreground">{t.plan.dayCard.notPlanned}</span>}
         </Line>
-        {acts.length === 0 ? (
+        {acts.length === 0 && ranOn ? (
+          <Line label={t.plan.dayCard.done} testId="done-line">
+            <span className="font-semibold text-[var(--pos)]">{t.plan.dayCard.ranOn(formatWeekday(ranOn, true))}</span>
+          </Line>
+        ) : acts.length === 0 ? (
           <MissedLine date={date} />
         ) : (
-          acts.map((a) => {
+          acts.map((a, i) => {
             const share = a.zonePercents[zone - 1] ?? undefined
             return (
               <Line key={a.id} label={t.plan.dayCard.done} testId="done-line">
@@ -273,15 +304,7 @@ export function DoneDayCard({
                   .filter(Boolean)
                   .map((part) => ` · ${part}`)
                   .join('')}
-                {onPlan && (
-                  <Check
-                    size={13}
-                    strokeWidth={3}
-                    role="img"
-                    aria-label={t.plan.dayCard.asPlanned}
-                    className="ml-1.5 inline-block shrink-0 align-[-2px] text-[var(--pos)]"
-                  />
-                )}
+                {fit && i === acts.length - 1 && <FitMark fit={fit} />}
               </Line>
             )
           })
@@ -301,16 +324,17 @@ export function DoneDayCard({
   )
 }
 
-export function RestDayCard({ date, next }: { date: string; next: { weekday: string; title: string } | null }) {
+export function RestDayCard({ date, next, covered = true }: { date: string; next: { weekday: string; title: string } | null; covered?: boolean }) {
   const r = t.plan.restCard
   return (
     <section
       data-testid="plan-rest-day"
+      data-covered={String(covered)}
       className="flex items-center justify-between gap-3 rounded-[18px] border border-dashed border-border px-4 py-3"
     >
       <div className="flex min-w-0 flex-col gap-0.5">
         <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">{`${formatWeekday(date, true)} · ${r.eyebrow}`}</p>
-        <h2 className="text-[17px] font-semibold leading-tight text-foreground">{r.title}</h2>
+        <h2 className="text-[17px] font-semibold leading-tight text-foreground">{covered ? r.title : t.plan.dayCard.notPlanned}</h2>
       </div>
       {next && (
         <p className="flex min-w-0 flex-col items-end text-right text-xs text-muted-foreground" data-testid="rest-next">
@@ -318,6 +342,19 @@ export function RestDayCard({ date, next }: { date: string; next: { weekday: str
           <span className="max-w-full truncate">{next.title}</span>
         </p>
       )}
+    </section>
+  )
+}
+
+export function BlockFinishedCard({ done, total }: { done: number; total: number }) {
+  const r = t.plan.restCard
+  return (
+    <section
+      data-testid="plan-block-finished"
+      className="flex flex-col gap-0.5 rounded-[18px] border border-dashed border-border px-4 py-3"
+    >
+      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">{r.finishedEyebrow}</p>
+      <h2 className="text-[17px] font-semibold leading-tight text-foreground">{r.finished(done, total)}</h2>
     </section>
   )
 }

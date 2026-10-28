@@ -1,7 +1,9 @@
 import type { ActivityType } from '@/domain/activity/types'
+import { climbPerKm, type ExploreSession, type SessionDay } from '@/domain/explore/climbBudget'
 import type { ScoredRoute } from '@/domain/explore/types'
 import type { NavigationOrigin } from '@/lib/navigation'
 import type { LngLatBounds } from '@/lib/routeFrame'
+import { appTodayIso, wallClockHour, wallClockMs } from '@/lib/calendarDate'
 import { median } from '@/lib/math'
 import { ROUTE_KM_MAX, ROUTE_KM_MIN, stepKm, type ExploreFrom, type ExploreRouteParams } from './exploreHref'
 
@@ -26,8 +28,10 @@ export interface ExplorePlan {
   /** The whole session, strides and recoveries included. */
   distanceM: number | null
   paceSecPerKm: number | null
-  /** Reps or a tempo: the loop should be flat and clear of crossings. */
-  quality: boolean
+  /** A quality session (reps or a tempo) wants a flat loop clear of crossings. */
+  session: ExploreSession
+  /** The hour the athlete usually sets off, within Garmin's scheduled part of the day; null with no run to go by. */
+  hour: number | null
 }
 
 /**
@@ -42,6 +46,25 @@ export function generatorPlan(
   if (link && link.date == null && link.km != null) return null
   const day = link?.date ?? today
   return day ? (plans.find((plan) => plan.date === day) ?? null) : null
+}
+
+/** The day the loop is for (the plan's, else today) and whether a quality session follows it. */
+export function generatorDay(plans: readonly ExplorePlan[], plan: ExplorePlan | null, today: string | null | undefined): SessionDay {
+  const day = plan?.date ?? today
+  if (!day) return { session: plan?.session ?? null, beforeQuality: false }
+  const next = new Date(Date.parse(`${day}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10)
+  return { session: plan?.session ?? null, beforeQuality: plans.some((p) => p.date === next && p.session === 'quality') }
+}
+
+/**
+ * Today's loop is run now; a later day's at the athlete's usual hour, or at this hour of the day without one. Read on
+ * the athlete's clock, as the panel's sunset is.
+ */
+export function runStart(plan: Pick<ExplorePlan, 'date' | 'hour'> | null, today: string | null, now: number): { date: string; now: number } {
+  const day = today ?? appTodayIso(new Date(now))
+  if (!plan || plan.date <= day) return { date: day, now }
+  const timeZone = process.env.NEXT_PUBLIC_TIME_ZONE || 'Europe/Paris'
+  return { date: plan.date, now: wallClockMs(plan.date, plan.hour ?? wallClockHour(now, timeZone), timeZone) }
 }
 
 export interface GeneratorTarget {
@@ -124,7 +147,15 @@ export interface RouteStats {
   climbM: number | null
   /** Whole per cent of the loop on new ground. */
   newPct: number
+  /** null when the provider gave no elevation. */
+  climbPerKm: number | null
+  /** Whole per cent of the loop on trails, soft ground or steps. */
+  trailPct: number
+  /** Metres climbing at 10 % or more. */
+  steepClimbM: number
 }
+
+const pct = (share: number) => Math.round(Math.min(1, Math.max(0, share)) * 100)
 
 export function routeStats(route: ScoredRoute, paceSecPerKm: number | null): RouteStats {
   const distanceKm = route.candidate.distanceM / 1000
@@ -133,7 +164,10 @@ export function routeStats(route: ScoredRoute, paceSecPerKm: number | null): Rou
     distanceKm,
     timeSeconds: paceSecPerKm != null && paceSecPerKm > 0 ? distanceKm * paceSecPerKm : null,
     climbM: ascent != null && Number.isFinite(ascent) ? Math.max(0, Math.round(ascent)) : null,
-    newPct: Math.round(Math.min(1, Math.max(0, route.newShare)) * 100),
+    newPct: pct(route.newShare),
+    climbPerKm: ascent != null && Number.isFinite(ascent) ? Math.round(climbPerKm(ascent, route.candidate.distanceM)) : null,
+    trailPct: pct(route.trailShare),
+    steepClimbM: Math.round(route.steepClimbM),
   }
 }
 

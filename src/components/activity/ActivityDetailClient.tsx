@@ -15,7 +15,7 @@ import { KmSplits } from './KmSplits'
 import { BestEfforts } from './BestEfforts'
 import { RunPlace } from './RunPlace'
 import type { ChartZones } from './chartStackLanes'
-import { formatClock, formatDistance, formatDuration, formatDurationRounded } from '@/lib/formatters'
+import { formatClock, formatDistance, formatDurationRounded } from '@/lib/formatters'
 import { ChartCardSkeleton } from '@/components/ui/Skeleton'
 import { StickyBar } from '@/components/ui/StickyBar'
 import { SegmentedTabs, useSegmentedTabs } from '@/components/ui/SegmentedTabs'
@@ -28,7 +28,7 @@ import { SimilarRuns } from './SimilarRuns'
 import { ActivityNotes } from './ActivityNotes'
 import { conditionsChips, garminActivityUrl } from './runConditions'
 import { isWatchId } from '@/lib/garminConnect'
-import type { ShoeTag } from '@/domain/shoe/types'
+import { RunShoe, type ShoeOption } from './RunShoe'
 import type { Insight } from '@/lib/gemini'
 import { t } from '@/i18n'
 
@@ -49,9 +49,13 @@ interface Props {
   qualifiedEfforts?: QualifiedEffort[]
   aiVerdict: Insight | null
   dynamicsBaseline: DynamicsBaseline | null
-  shoe?: ShoeTag | null
+  shoe?: (ShoeOption & { source?: 'choice' | 'default' }) | null
+  /** The active shoes the owner can pick for this run. */
+  shoeOptions?: ShoeOption[]
   similarRuns?: SimilarRunsData | null
   extras?: ReactNode
+  /** Inside the panel, so a short tab's height falls below it, not between it and the content. */
+  footer?: ReactNode
   back?: ReactNode
   share?: ReactNode
   chartZones?: ChartZones | null
@@ -85,8 +89,8 @@ function buildPrimaryStats(activity: ActivityDetailView): PrimaryStat[] {
   const s = t.activity.stats
   const stats: PrimaryStat[] = [
     { label: s.distance, value: formatDistance(activity.distanceKm), unit: t.units.km },
-    // No unit: m:ss or h:mm:ss says what it is, and "min" crowded the pace beside it.
-    { label: s.duration, value: formatDuration(Math.round(activity.durationSeconds)) },
+    // As the share card reads it: h:mm from an hour, m:ss under; h:mm:ss took too much of the row.
+    { label: s.duration, ...formatDurationRounded(activity.durationSeconds) },
   ]
   if (activity.paceSecPerKm) stats.push({ label: s.pace, value: formatClock(activity.paceSecPerKm), unit: t.units.perKm })
   if (activity.avgHeartRate) stats.push({ label: s.avgHr, value: `${activity.avgHeartRate}`, unit: t.units.bpm })
@@ -127,6 +131,8 @@ function StatStrip({ stats, testId = 'run-stats' }: { stats: PrimaryStat[]; test
   )
 }
 
+const NO_SHOES: ShoeOption[] = []
+
 export function ActivityDetailClient({
   activity,
   name,
@@ -137,8 +143,10 @@ export function ActivityDetailClient({
   aiVerdict,
   dynamicsBaseline,
   shoe = null,
+  shoeOptions = NO_SHOES,
   similarRuns = null,
   extras,
+  footer,
   back,
   share,
   chartZones = null,
@@ -159,6 +167,11 @@ export function ActivityDetailClient({
     activity.verticalOscillationMm != null ||
     activity.verticalRatioPct != null
   )
+
+  const bestEfforts = activity.bestEfforts && (
+    <BestEfforts bestEfforts={activity.bestEfforts} qualifiedEfforts={qualifiedEfforts} />
+  )
+  const recordsFirst = !!qualifiedEfforts?.some((effort) => activity.bestEfforts?.[effort.key] != null)
 
   const tabs = [
     { id: 'overview' as const, label: t.activity.tabs.overview, show: true },
@@ -240,9 +253,15 @@ export function ActivityDetailClient({
         )
       })()}
 
-      <RunVerdict activity={activity} aiVerdict={aiVerdict}>
-        {!activity.avgHeartRate && (
-          <span className={cn(RUN_CHIP_CLASS, 'font-semibold text-[var(--warn)]')}>{t.activity.dataQuality.estimated}</span>
+      <RunVerdict activity={activity} type={type} aiVerdict={aiVerdict}>
+        {activity.hrUntrusted ? (
+          <span className={cn(RUN_CHIP_CLASS, 'font-semibold text-[var(--warn)]')} data-testid="run-hr-untrusted">
+            {t.activity.dataQuality.hrUntrusted[activity.hrUntrusted]}
+          </span>
+        ) : (
+          !activity.avgHeartRate && (
+            <span className={cn(RUN_CHIP_CLASS, 'font-semibold text-[var(--warn)]')}>{t.activity.dataQuality.estimated}</span>
+          )
         )}
         <span className={RUN_CHIP_CLASS} data-testid="run-effort">
           {activity.rpe !== null ? t.activities.row.rpeValue(activity.rpe) : `${e.label} ${e.notLogged}`}
@@ -253,26 +272,12 @@ export function ActivityDetailClient({
               {text}
             </span>
           ))}
-        {/* The pair is set on the watch, so the chip opens Garmin Connect, but only
-            for a run with a watch id: otherwise there is nothing at the other end. */}
-        {isWatchId(activity.id) && !activity.gearPending ? (
-          <a
-            href={garminActivityUrl(activity.id)}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={shoe ? t.activity.shoe.changeInGarmin(shoe.name) : t.activity.shoe.addInGarmin}
-            className={cn(RUN_CHIP_CLASS, !shoe && 'font-medium text-accent-text')}
-            data-testid="run-shoe"
-          >
-            <span className="truncate">{shoe ? shoe.name : t.activity.shoe.add}</span>
-          </a>
-        ) : (
-          shoe && (
-            <span className={RUN_CHIP_CLASS} data-testid="run-shoe">
-              <span className="truncate">{shoe.name}</span>
-            </span>
-          )
-        )}
+        <RunShoe
+          activityId={activity.id}
+          shoe={shoe}
+          options={shoeOptions}
+          garminUrl={isWatchId(activity.id) && !activity.gearPending ? garminActivityUrl(activity.id) : null}
+        />
         <ActivityNotes activityId={activity.id} />
       </RunVerdict>
 
@@ -300,6 +305,7 @@ export function ActivityDetailClient({
       >
         {tab === 'overview' && (
           <>
+            {recordsFirst && bestEfforts}
             {extras}
             <PaceHrPreview
               paceSamples={activity.paceSamples}
@@ -315,9 +321,7 @@ export function ActivityDetailClient({
               onShowCharts={hasCharts ? () => setTab('charts') : undefined}
             />
             {similarRuns && <SimilarRuns data={similarRuns} />}
-            {activity.bestEfforts && (
-              <BestEfforts bestEfforts={activity.bestEfforts} qualifiedEfforts={qualifiedEfforts} />
-            )}
+            {!recordsFirst && bestEfforts}
           </>
         )}
 
@@ -340,6 +344,8 @@ export function ActivityDetailClient({
         )}
 
         {tab === 'dynamics' && <RunningDynamics activity={activity} baseline={dynamicsBaseline} />}
+
+        {footer}
       </div>
     </>
   )

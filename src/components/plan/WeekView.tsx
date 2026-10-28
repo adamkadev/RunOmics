@@ -4,44 +4,57 @@ import { useMemo } from 'react'
 import Link from 'next/link'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import type { ActivityType, PlannedWorkout } from '@/domain/activity/types'
+import type { BlockGuideProposal, NumberRange } from '@/domain/coaching/types'
 import type { PlanRun } from './planRun'
 import type { CrossTrainingEntry } from '@/domain/activity/crossTraining'
 import { CrossTrainingList } from '@/components/crossTraining/CrossTraining'
-import { weekTarget } from '@/domain/training/weekTarget'
 import type { PlanPhaseRange } from '@/application/usecases/GetTrainingPlan'
 import type { UpcomingRace } from '@/application/usecases/GetGoalsData'
 import type { TrainingZonesData } from '@/application/usecases/GetTrainingZones'
 import { cardClass } from '@/components/ui/Card'
 import { CHECKPOINT_HREF } from '@/components/checkpoint/checkpointHref'
 import { addDays, isoDate } from '@/lib/calendarDate'
-import { formatDateRange, formatDurationWords, formatPlannedKm, formatRanKm, formatWeekday } from '@/lib/formatters'
+import { formatClock, formatDateRange, formatDurationWords, formatPlannedKm, formatRanKm, formatWeekday } from '@/lib/formatters'
 import { cn } from '@/lib/utils'
 import { t } from '@/i18n'
 import type { PlanCoachingView, PlanPrescriptionView } from './planCoachingView'
 import { coachWorkoutView, plannedWorkoutView, type PlanWorkoutView } from './planWorkoutView'
 import { sessionTitle } from './sessionTitle'
 import { dayKind, kindLetter } from './sessionKind'
-import { formatWeekKm, weekPlanDays } from './weekPlanDays'
+import { formatWeekKm, planWeekTarget } from './weekPlanDays'
 import { phaseWeek, planPhaseSpans, raceCountdown } from './planPhaseSpans'
 import { planRace } from './planRace'
 import { workoutSummary } from './workoutSummary'
 import { DaySelector, type SelectorDay } from './DaySelector'
+import { dayFit } from './dayFit'
 import { sessionLabel } from '@/lib/activityTitle'
-import { ComingUpCard, DoneDayCard, NextKeySessionCard, PlannedWorkoutCard, RestDayCard, type ComingUpRow } from './PlanDayCard'
+import { BlockFinishedCard, ComingUpCard, DoneDayCard, NextKeySessionCard, PlannedWorkoutCard, RestDayCard, type ComingUpRow } from './PlanDayCard'
+import { blockCovers, blockLifecycle } from './blockLifecycle'
+import { useCoachWords } from '@/components/coaching/useCoachWords'
+import { useSkippedDays } from '@/lib/skippedDays'
 
 const NAV_BUTTON =
   'hit-44 flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-40'
 
-function PhaseCard({ name, week, total, race, href }: { name: string; week: number; total: number; race: string | null; href?: string }) {
+function proposalLine(proposal: BlockGuideProposal): string {
+  const p = t.plan.phase
+  const range = (guide: NumberRange) => `${formatClock(guide.min)}–${formatClock(guide.max)}`
+  return p.guideProposal(p.repClass[proposal.repClass], range(proposal.guide), range(proposal.proposedGuide), p.proposalSource[proposal.source])
+}
+
+function PhaseCard({ name, week, total, race, href, proposals = [] }: { name: string; week: number; total: number; race: string | null; href?: string; proposals?: BlockGuideProposal[] }) {
   const p = t.plan.phase
   const weekOf = p.weekOf(total)
-  const className = cardClass({ padding: 'none', clickable: !!href, className: 'flex flex-col gap-2.5 px-3.5 py-3' })
-  const body = (
-    <>
+  return (
+    <section className={cardClass({ padding: 'none', clickable: !!href, className: 'relative flex flex-col gap-2.5 px-3.5 py-3' })} data-testid="phase-line">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-        <h2 className="flex items-center gap-1 text-headline text-foreground">
-          {name}
-          {href && <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted-foreground" />}
+        <h2 className="text-headline text-foreground">
+          {href ? (
+            <Link href={href} className="flex items-center gap-1 after:absolute after:inset-0">
+              {name}
+              <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted-foreground" />
+            </Link>
+          ) : name}
         </h2>
         <p className="text-xs text-muted-foreground">
           {weekOf.before} {week} {weekOf.after}
@@ -53,12 +66,10 @@ function PhaseCard({ name, week, total, race, href }: { name: string; week: numb
           <span key={i} data-done={i < week || undefined} className={cn('h-[5px] flex-1 rounded-full', i < week ? 'bg-accent' : 'bg-[var(--line-2)]')} />
         ))}
       </div>
-    </>
-  )
-  return href ? (
-    <Link href={href} className={className} data-testid="phase-line">{body}</Link>
-  ) : (
-    <section className={className} data-testid="phase-line">{body}</section>
+      {proposals.map((proposal) => (
+        <p key={`${proposal.source}:${proposal.repClass}`} className="text-xs text-muted-foreground" data-testid="phase-proposal">{proposalLine(proposal)}</p>
+      ))}
+    </section>
   )
 }
 
@@ -171,28 +182,34 @@ export function WeekView({
   const selected = dates.includes(selectedDate) ? selectedDate : (dates.find((d) => d === today) ?? firstDay)
 
   const target = useMemo(
-    () => weekTarget(weekPlanDays(dates, { byDate, byDatePlanned, byDateCoach: byDateCoach ?? new Map() }), today, null),
+    () => planWeekTarget(dates, { byDate, byDatePlanned, byDateCoach: byDateCoach ?? new Map() }, today, null),
     [dates, byDate, byDatePlanned, byDateCoach, today]
   )
 
+  const skipped = useSkippedDays()
   const selectorDays = useMemo<SelectorDay[]>(
     () =>
       target.days.map((day) => {
         const kind = dayKind(day.date, byDate.get(day.date) ?? [], byDatePlanned, byDateCoach)
         return {
           date: day.date,
-          state: day.state,
-          km: day.state === 'done' ? day.ranKm : day.plannedKm,
+          state: day.state === 'missed' && skipped.has(day.date) ? 'rest' : day.state,
+          km: day.state === 'done' ? (day.runs > 0 ? day.ranKm : null) : day.plannedKm,
           color: kind?.color ?? null,
+          text: kind?.text ?? null,
           letter: kind && day.state !== 'rest' ? kindLetter(kind.type, kind.kind) : null,
           isToday: day.date === today,
           other: (byDateOther?.get(day.date) ?? []).map((entry) => entry.kind),
         }
       }),
-    [target, byDate, byDateOther, byDatePlanned, byDateCoach, today]
+    [target, byDate, byDateOther, byDatePlanned, byDateCoach, today, skipped]
   )
 
+  const block = useMemo(() => blockLifecycle(coaching, today), [coaching, today])
+
   const phase = useMemo(() => phaseWeek(planPhaseSpans(coaching, planPhaseRanges), firstDay), [coaching, planPhaseRanges, firstDay])
+  const words = useCoachWords(coaching !== null)
+  const blockName = phase?.span.key === 'general' ? words?.block.name || null : null
   const race = useMemo(() => {
     const next = planRace(coaching, nextRace, today)
     return next ? raceCountdown(next, today) : null
@@ -202,6 +219,8 @@ export function WeekView({
   const others = byDateOther?.get(selected) ?? []
   const kind = dayKind(selected, acts, byDatePlanned, byDateCoach)
   const workouts = selectedWorkouts(selected, byDatePlanned, byDateCoach, trainingZones)
+  const { ranOn = null, standsFor = null } = target.days.find((day) => day.date === selected) ?? {}
+  const fitWorkouts = workouts.length > 0 || !standsFor ? workouts : selectedWorkouts(standsFor, byDatePlanned, byDateCoach, trainingZones)
 
   function activityTitle(a: PlanRun): string {
     if (a.description && a.description !== t.activityTypes[a.type]) return a.description
@@ -218,7 +237,7 @@ export function WeekView({
       if (k?.kind !== 'quality') continue
       const workout = selectedWorkouts(date, byDatePlanned, byDateCoach, trainingZones)[0]
       if (!workout) continue
-      return { date, weekday: formatWeekday(date, true), title: workoutSummary(workout).title, color: k.color }
+      return { date, weekday: formatWeekday(date, true), title: workoutSummary(workout).title, color: k.text }
     }
     return null
   })()
@@ -226,29 +245,47 @@ export function WeekView({
   let dayCard
   if (acts.length > 0 || (selected < today && workouts.length > 0)) {
     const title = sessionLabel(acts.length > 0 ? activityTitle(acts[0]!) : workoutSummary(workouts[0]!).title)
+    const session = fitWorkouts[0] ?? null
+    const planned = session ? plannedText(session, title) : null
     dayCard = (
       <DoneDayCard
         date={selected}
         kind={kind}
         title={title}
-        planned={workouts[0] ? plannedText(workouts[0], title) : null}
+        planned={session && workouts.length === 0 && standsFor ? [t.plan.dayCard.standsFor(formatWeekday(standsFor, true)), planned].filter(Boolean).join(' · ') : planned}
         acts={acts}
-        onPlan={workouts.length > 0}
+        fit={dayFit(acts, session, hrZoneBoundsBpm)}
+        ranOn={ranOn}
       />
     )
   } else if (workouts.length > 0 && kind) {
     dayCard = (
       <div className="flex flex-col gap-3">
         {workouts.map((workout) => (
-          <PlannedWorkoutCard key={workout.key} workout={workout} kind={kind} hrZoneBoundsBpm={hrZoneBoundsBpm} exploreAvailable={exploreAvailable} />
+          <PlannedWorkoutCard
+            key={workout.key}
+            workout={workout}
+            kind={kind}
+            hrZoneBoundsBpm={hrZoneBoundsBpm}
+            exploreAvailable={exploreAvailable}
+          />
         ))}
       </div>
     )
   } else {
     const coming = comingUpRows(dates, today, byDate, byDatePlanned, byDateCoach, trainingZones)
+    const over = block !== null && selected > block.endDate
     dayCard = (
       <>
-        <RestDayCard date={selected} next={selected < today ? null : findNextPlanned(dates, selected, byDatePlanned, byDateCoach)} />
+        {over ? (
+          <BlockFinishedCard done={block.done} total={block.total} />
+        ) : (
+          <RestDayCard
+            date={selected}
+            next={selected < today ? null : findNextPlanned(dates, selected, byDatePlanned, byDateCoach)}
+            covered={blockCovers(block, selected)}
+          />
+        )}
         {coming.length > 0 && <ComingUpCard rows={coming} selectedDate={selected} onSelect={onSelectDate} />}
       </>
     )
@@ -256,7 +293,16 @@ export function WeekView({
 
   return (
     <div className="flex flex-col gap-3.5">
-      {phase && <PhaseCard name={phase.span.name} week={phase.week} total={phase.total} race={race} href={phase.span.key === 'general' ? CHECKPOINT_HREF : undefined} />}
+      {phase && (
+        <PhaseCard
+          name={blockName ?? phase.span.name}
+          week={phase.week}
+          total={phase.total}
+          race={race}
+          href={phase.span.key === 'general' ? CHECKPOINT_HREF : undefined}
+          proposals={phase.span.key === 'general' ? words?.block.guideProposals : undefined}
+        />
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1" data-testid="week-row">
         <div className="flex min-w-0 items-center gap-0.5">

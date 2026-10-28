@@ -19,7 +19,7 @@ export interface InjuryHistory {
   injuries: RunningInjury[]
 }
 
-export type TrainingBreakReason = 'injury' | 'illness' | 'heat' | 'travel' | 'personal'
+export type TrainingBreakReason = 'injury' | 'illness' | 'pregnancy' | 'heat' | 'travel' | 'personal'
 
 /** Typed into athlete.json: without it a coach reads a gap as lost fitness rather than a life event. */
 export interface TrainingBreak {
@@ -54,6 +54,10 @@ export interface AthleteProfile {
   lastUpdate?: string
   injuryHistory?: InjuryHistory
   trainingBreaks?: TrainingBreak[]
+  /** Typed by hand: the weekly kilometres a block's growth stops at. */
+  maxWeeklyKm?: number
+  /** YYYY-MM-DD: the first day a reliable heart-rate sensor was worn; earlier runs' heart rate is not trusted. */
+  hrReliableFrom?: string
 }
 
 export function getAthleteProfile(): AthleteProfile {

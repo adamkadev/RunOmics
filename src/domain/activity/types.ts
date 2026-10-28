@@ -36,6 +36,10 @@ export interface ActivityWeather {
   code: number
 }
 
+export type HrSource = 'external' | 'wrist'
+
+export type HrDistrust = 'marked' | 'beforeReliable' | 'wrist'
+
 export interface HrZone {
   zone: number
   seconds: number
@@ -60,9 +64,12 @@ export interface Activity {
   paceSecPerKm: number | null
   hrZones: HrZone[]
   avgHeartRate: number | null
+  /** From the FIT's paired sensors; null without heart rate, absent until a reprocess. */
+  hrSource?: HrSource | null
+  /** Set on load when the heart rate is not trusted; its readings are then removed. */
+  hrUntrusted?: HrDistrust
   rpe: number | null
   comment: string
-  polyline: string | null
   route: [number, number][] | null
   elevationGain: number | null
   aerTrainingEffect: number | null
@@ -87,7 +94,14 @@ export interface Activity {
   vo2maxGarmin: number | null
   avgTemperature: number | null
   cadenceSamples: number[] | null
+  /** The longest stretch run without walking or stopping; absent until a reprocess. */
+  longestContinuousRunSec?: number | null
+  longestContinuousRunM?: number | null
+  /** Time spent running, walk breaks and stops left out; absent until a reprocess. */
+  runningSec?: number | null
   gearId: string | null
+  /** Set when the shoe is the owner's pick in the app, or the default shoe filling a run Garmin gave none. */
+  gearSource?: 'choice' | 'default'
   gearPending?: true
   weather: ActivityWeather | null
 }
@@ -138,37 +152,6 @@ export interface PlannedWorkout {
   steps?: WorkoutStep[]
 }
 
-export interface WeeklyVolume {
-  week: number
-  year: number
-  label: string
-  distanceKm: number
-  sessionCount: number
-}
-
-export interface TypeDistribution {
-  type: ActivityType
-  count: number
-  distanceKm: number
-  percent: number
-}
-
-export interface WeekSummary {
-  weekNumber: number
-  totalDistanceKm: number
-  totalDurationSeconds: number
-  sessionCount: number
-  avgHeartRate: number | null
-  avgPaceSecPerKm: number | null
-}
-
 export interface DashboardData {
-  currentWeek: WeekSummary
-  lastWeek: Pick<WeekSummary, 'totalDistanceKm' | 'sessionCount'>
-  weeks: WeekSummary[]
-  weeklyVolume: WeeklyVolume[]
-  typeDistribution: TypeDistribution[]
   recentActivities: ActivitySummary[]
-  currentStreak: number
-  longestStreak: number
 }

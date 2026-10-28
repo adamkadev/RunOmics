@@ -1,6 +1,6 @@
 import type { Activity } from '@/domain/activity/types'
 import type { OfficialRaceResult } from '@/domain/activity/raceResult'
-import type { CoachingPlan, NumberRange, WorkoutPrescription, WorkoutSegment } from '@/domain/coaching/types'
+import type { BlockGuideProposal, CoachingPlan, NumberRange, WorkoutPrescription, WorkoutSegment } from '@/domain/coaching/types'
 import { DAY_MS } from '@/lib/calendarDate'
 import { thresholdPaceFromVdot, vdotFromEffort } from '@/domain/training/vdot'
 import { CONTROLLED_THRESHOLD, heartRateUnder, repLengthClass, type RepLengthClass } from './controlledThreshold'
@@ -10,7 +10,9 @@ import { CONTROLLED_THRESHOLD, heartRateUnder, repLengthClass, type RepLengthCla
  * Every threshold it judges by lives in CONTROLLED_THRESHOLD.
  */
 
-export function controlledStep(workout: WorkoutPrescription): { repetitions: number; step: WorkoutSegment } | null {
+type Written = Pick<WorkoutPrescription, 'type' | 'blocks'> & Partial<Pick<WorkoutPrescription, 'status'>>
+
+export function controlledStep(workout: Written): { repetitions: number; step: WorkoutSegment } | null {
   if (workout.type !== 'threshold' || workout.status === 'cancelled') return null
   for (const block of workout.blocks) {
     if (block.kind !== 'repeat') continue
@@ -183,6 +185,8 @@ export interface EasyRunReading {
   date: string
   hr: number
   paceSecPerKm: number
+  gapSecPerKm: number | null
+  climbMPerKm: number | null
   tempC: number | null
   durationSeconds: number
 }
@@ -192,6 +196,10 @@ export interface FatigueReading {
   /** The median heart rate of comparable easy runs, or null with too few to say. */
   normalHr: number | null
   comparables: number
+  /** How many of the comparables were matched by grade-adjusted pace rather than raw pace. */
+  gradeAdjusted: number
+  /** Newer easy runs that climbed too much to compare without a grade-adjusted pace. */
+  leftOut: EasyRunReading[]
   flagged: boolean
 }
 
@@ -210,6 +218,8 @@ function easyRuns(activities: Activity[], byDate: Map<string, WorkoutPrescriptio
       date: dayOf(activity),
       hr: activity.avgHeartRate,
       paceSecPerKm: activity.paceSecPerKm,
+      gapSecPerKm: activity.gapSecPerKm ?? null,
+      climbMPerKm: activity.elevationGain == null || activity.distanceKm <= 0 ? null : activity.elevationGain / activity.distanceKm,
       tempC: activity.weather?.tempC ?? null,
       durationSeconds: activity.durationSeconds,
     }]
@@ -222,21 +232,46 @@ function median(values: number[]): number {
   return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2
 }
 
+const hilly = (run: EasyRunReading) => run.climbMPerKm !== null && run.climbMPerKm >= CONTROLLED_THRESHOLD.fatigue.hillyClimbMPerKm
+
+function paceApart(left: EasyRunReading, right: EasyRunReading): { seconds: number; gradeAdjusted: boolean } | null {
+  if (left.gapSecPerKm !== null && right.gapSecPerKm !== null) {
+    return { seconds: Math.abs(left.gapSecPerKm - right.gapSecPerKm), gradeAdjusted: true }
+  }
+  if (hilly(left) || hilly(right)) return null
+  return { seconds: Math.abs(left.paceSecPerKm - right.paceSecPerKm), gradeAdjusted: false }
+}
+
 /** Heat is controlled for by comparing only like days, not by correcting for it. */
 export function assessFatigue(runs: EasyRunReading[]): FatigueReading | null {
-  const ordered = [...runs].sort((left, right) => left.date.localeCompare(right.date))
+  const sorted = [...runs].sort((left, right) => left.date.localeCompare(right.date))
+  const ordered = sorted.filter((run) => run.gapSecPerKm !== null || !hilly(run))
   const run = ordered.at(-1)
   if (!run) return null
   const rules = CONTROLLED_THRESHOLD.fatigue
   const since = new Date(Date.parse(`${run.date}T00:00:00Z`) - rules.lookbackDays * DAY_MS).toISOString().slice(0, 10)
-  const comparable = ordered.slice(0, -1).filter((candidate) => candidate.date >= since
-    && candidate.tempC !== null && run.tempC !== null
-    && Math.abs(candidate.tempC - run.tempC) <= rules.similarTempC
-    && Math.abs(candidate.paceSecPerKm - run.paceSecPerKm) <= rules.similarPaceSecPerKm
-    && Math.abs(candidate.durationSeconds - run.durationSeconds) <= run.durationSeconds * rules.similarDurationShare)
-  if (comparable.length < rules.minComparables) return { run, normalHr: null, comparables: comparable.length, flagged: false }
-  const normalHr = median(comparable.map((candidate) => candidate.hr))
-  return { run, normalHr, comparables: comparable.length, flagged: run.hr - normalHr >= rules.hrAboveNormalBpm }
+  const comparable = ordered.slice(0, -1).flatMap((candidate) => {
+    const apart = paceApart(candidate, run)
+    const similar = apart !== null && apart.seconds <= rules.similarPaceSecPerKm && candidate.date >= since
+      && candidate.tempC !== null && run.tempC !== null
+      && Math.abs(candidate.tempC - run.tempC) <= rules.similarTempC
+      && Math.abs(candidate.durationSeconds - run.durationSeconds) <= run.durationSeconds * rules.similarDurationShare
+    return similar ? [{ hr: candidate.hr, gradeAdjusted: apart.gradeAdjusted }] : []
+  })
+  const reading = {
+    run,
+    comparables: comparable.length,
+    gradeAdjusted: comparable.filter((match) => match.gradeAdjusted).length,
+    leftOut: sorted.slice(sorted.indexOf(run) + 1),
+  }
+  if (comparable.length < rules.minComparables) return { ...reading, normalHr: null, flagged: false }
+  const normalHr = median(comparable.map((match) => match.hr))
+  return { ...reading, normalHr, flagged: run.hr - normalHr >= rules.hrAboveNormalBpm }
+}
+
+export function fatigueBasis({ comparables, gradeAdjusted }: Pick<FatigueReading, 'comparables' | 'gradeAdjusted'>): string {
+  if (gradeAdjusted === 0) return 'pace'
+  return gradeAdjusted === comparables ? 'grade-adjusted pace' : `pace, grade-adjusted for ${gradeAdjusted} of ${comparables}`
 }
 
 export interface FitnessCheck {
@@ -297,7 +332,8 @@ export function readFitnessCheck(
     paceSecPerKm: pace(latest),
     previous: previous ? { date: dayOf(previous), paceSecPerKm: pace(previous) } : null,
     impliedThresholdSecPerKm: thresholdPaceFromVdot(vdotFromEffort(5, seconds(latest))),
-    proposedGuides: ratio === null ? [] : [...currentGuides(byDate, referenceDate)].map(([repClass, guide]) => ({
+    // The guides the check was run under: one adopted since would otherwise be moved by the same check again.
+    proposedGuides: ratio === null ? [] : [...currentGuides(byDate, dayOf(latest))].map(([repClass, guide]) => ({
       repClass,
       guide,
       proposedGuide: { min: Math.round(guide.min * ratio), max: Math.round(guide.max * ratio) },
@@ -336,6 +372,43 @@ export function autoregulationReport(
     fatigue: assessFatigue(easyRuns(past, byDate)),
     fitnessCheck: readFitnessCheck(past, byDate, referenceDate, officialResults),
   }
+}
+
+/** Every proposal open when a block is written, marked adopted where the block already prescribes it. */
+export function blockGuideProposals(report: AutoregulationReport | undefined, workouts: Written[]): BlockGuideProposal[] {
+  if (!report) return []
+  const prescribed = new Map<RepLengthClass, NumberRange>()
+  for (const workout of workouts) {
+    const controlled = controlledStep(workout)
+    if (!controlled) continue
+    const repClass = repLengthClass(controlled.step.target.durationSeconds!)
+    if (!prescribed.has(repClass)) prescribed.set(repClass, controlled.step.target.paceSecPerKm!)
+  }
+  const adopted = (repClass: RepLengthClass, proposed: NumberRange) => {
+    const guide = prescribed.get(repClass)
+    return guide !== undefined && guide.min === proposed.min && guide.max === proposed.max
+  }
+  const check = report.fitnessCheck
+  return [
+    ...report.guideProposals.map((proposal) => ({
+      repClass: proposal.repClass,
+      source: 'sessions' as const,
+      guide: proposal.guide,
+      proposedGuide: proposal.proposedGuide,
+      dates: proposal.sessions.map((session) => session.date),
+      adopted: adopted(proposal.repClass, proposal.proposedGuide),
+    })),
+    ...(check?.proposedGuides ?? [])
+      .filter((proposal) => proposal.guide.min !== proposal.proposedGuide.min || proposal.guide.max !== proposal.proposedGuide.max)
+      .map((proposal) => ({
+        repClass: proposal.repClass,
+        source: 'fitness_check' as const,
+        guide: proposal.guide,
+        proposedGuide: proposal.proposedGuide,
+        dates: [check!.date],
+        adopted: adopted(proposal.repClass, proposal.proposedGuide),
+      })),
+  ]
 }
 
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`

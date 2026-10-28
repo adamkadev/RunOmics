@@ -4,7 +4,7 @@ import { runHistory } from '@/domain/activity/runHistory'
 import { runVerdictInsightHash, runVerdictNoteKey, runVerdictSurface, type RunVerdictContext } from '@/domain/ai/runVerdictInsight'
 import type { Activity } from '@/domain/activity/types'
 import type { CachedInsight, CachedKeys, VerdictPhrasing } from '@/infrastructure/repositories/FirestoreInsightsRepository'
-import type { Spender } from '@/lib/aiSpend'
+import type { Spender } from '@/application/ai/aiSpend'
 import type { InsightRequest, InsightResult } from '@/lib/gemini'
 import {
   generateFromPool,
@@ -318,7 +318,7 @@ describe('runSurface', () => {
       job('today')
     )
 
-    expect(outcome).toEqual({ generated: false, reason: `${BEST}: em-dash` })
+    expect(outcome).toEqual({ generated: false, reason: `${BEST}: em-dash`, missed: true })
     expect(store.saved).toEqual([])
     expect(revalidate).not.toHaveBeenCalled()
   })
@@ -387,7 +387,7 @@ describe('writeVerdicts', () => {
       { surface: runVerdictSurface('just-run'), headline: 'Verdict 1', hash: runVerdictInsightHash(JUST_RUN), previous: null },
     ])
     expect(revalidate).toHaveBeenCalledWith('/activities/just-run')
-    expect(notify).toHaveBeenCalledWith({ headline: 'Verdict 1', body: 'Verdict 1, and why.' })
+    expect(notify).toHaveBeenCalledWith({ headline: 'Verdict 1', body: 'Verdict 1, and why.' }, 'just-run')
   })
 
   it('never pushes a backfilled verdict', async () => {
@@ -547,7 +547,7 @@ describe('runInsightPass', () => {
     )
 
     expect(notify).toHaveBeenCalledTimes(1)
-    expect(notify).toHaveBeenCalledWith({ headline: 'Verdict 1', body: 'Verdict 1, and why.' })
+    expect(notify).toHaveBeenCalledWith({ headline: 'Verdict 1', body: 'Verdict 1, and why.' }, 'just-run')
   })
 
   it('writes the phrasing back once, newest first, as headline, body and the kind of session', async () => {
@@ -594,6 +594,17 @@ describe('runInsightPass', () => {
     expect(report.today).toEqual({ generated: true })
     expect(report.shoeVerdicts).toEqual({ pegasus: 'no time left in this invocation' })
     expect(report.runVerdicts).toMatchObject({ generated: 0, failures: ['last-month: no time left in this invocation'] })
+    expect(report.missed).toBe(2)
+  })
+
+  it('names each model Google closed during the pass, with its answer', async () => {
+    const generate = vi.fn(async ({ model }: InsightRequest) => (model === BEST ? fail('http 429: quota exceeded') : ok('Today')))
+
+    const report = await runInsightPass(deps({ generate }), surfaces({ today: async () => job('today') }), OPTIONS)
+
+    expect(report.today).toEqual({ generated: true })
+    expect(report.closedModels).toEqual([{ model: BEST, reason: 'http 429: quota exceeded' }])
+    expect(report.missed).toBe(0)
   })
 
   it('checks the PB celebration window against the pass clock', async () => {
@@ -616,6 +627,8 @@ describe('runInsightPass', () => {
       pbCelebration: { generated: false, reason: 'no fresh record' },
       shoeVerdicts: {},
       runVerdicts: { outstanding: 0, eligible: 0, fresh: 0, rest: 0, generated: 0, failures: [] },
+      missed: 0,
+      closedModels: [],
       spend: {},
     })
   })

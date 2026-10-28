@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { readProposalPreview, writeProposalPreview } from '@/application/coaching/preview'
+import { renewalDefaults } from '@/domain/coaching/renewal'
+import { appTodayIso } from '@/lib/calendarDate'
+import { dataWorkspace, pushWorkspace, removeWorkspace } from './coachingWorkspace'
 import { interopImport } from './interopImport'
 
 const WEEKDAY: Record<string, number> = {
@@ -20,24 +22,28 @@ function usage(): string {
     'RunOmics coaching preview/apply',
     '',
     '  npm run coach -- bootstrap --days tue,wed,thu,sat,sun --runs-per-week 5 [--race <id|name> | --general]',
-    '  npm run coach -- bootstrap --days ... --runs-per-week 5 --prompt-out coach-prompt.md',
     '  npm run coach -- bootstrap --days ... --runs-per-week 5 --from-answer answer.json',
-    '  npm run coach -- evaluate --activity <id|latest>',
-    '  npm run coach -- weekly-review',
+    '  npm run coach -- evaluate --activity <id|latest> [--from-answer answer.json]',
+    '  npm run coach -- weekly-review [--from-answer answer.json]',
     '  npm run coach -- autoregulate   (after each threshold session: proposes, never applies)',
     '  npm run coach -- --apply .coach-previews/<proposal>.json',
     '',
     'Options:',
     '  --data-dir <path>  Read/write an existing workspace without fetching or pushing it.',
     '  --runs-per-week <n> Normal desired runs, independently of available --days.',
+    '                     With a current plan, --days, --runs-per-week and --start all',
+    '                     default to it, so a renewal needs none of them.',
     '  --start <monday>   Write the new block from that Monday, at most a week out,',
     '                     keeping the current plan\'s sessions until then unchanged.',
     '  --general          Plan general preparation toward no race; races inside the',
     '                     block are run as supporting ones. The default with no race.',
-    '  --guidance-file <path> Additional athlete instructions for bootstrap.',
+    '  --guidance-file <path> Athlete instructions for bootstrap, in place of the data',
+    '                     workspace\'s coaching/guidance.md (read by default).',
     '  --context-out <path> Save the compact bootstrap context for inspection.',
-    '  --prompt-out <path> Write the coaching prompt to paste into a chat instead of calling the API.',
-    '  --from-answer <path> Build the proposal from a chat reply saved as JSON.',
+    '  --prompt-out <path> Where to write the coaching prompt for Claude Code',
+    '                     (default: <out>/coach-prompt.md).',
+    '  --from-answer <path> Build the proposal from the reply to that prompt, saved as JSON.',
+    '  --advisor gemini   Ask Gemini (GEMINI_COACH_API_KEY) instead of writing the prompt.',
     '  --reference-date <YYYY-MM-DD> Reproduce coaching at a specified date.',
     '  --replace          Supersede the active plan instead of refusing. The outgoing',
     '                     plan is kept under coaching/superseded/.',
@@ -59,8 +65,11 @@ function fileOption(args: string[], name: string): string | undefined {
   return fs.readFileSync(resolved, 'utf-8')
 }
 
-function availableDays(raw: string | undefined): number[] {
-  if (!raw) throw new Error('bootstrap requires --days (for example: --days tue,thu,sat,sun)')
+function availableDays(raw: string | undefined, fallback: number[] | undefined): number[] {
+  if (!raw) {
+    if (fallback?.length) return fallback
+    throw new Error('bootstrap requires --days (for example: --days tue,thu,sat,sun)')
+  }
   const parsed = raw.split(',').map((day) => {
     const value = WEEKDAY[day.trim().toLowerCase()]
     if (value === undefined) throw new Error(`Unknown weekday: ${day}`)
@@ -69,48 +78,43 @@ function availableDays(raw: string | undefined): number[] {
   return [...new Set(parsed)]
 }
 
-function requestedRuns(args: string[]): number {
+function requestedRuns(args: string[], fallback: number | undefined): number {
   const raw = option(args, '--runs-per-week')
-  if (!raw) throw new Error('bootstrap requires --runs-per-week independently of --days')
+  if (!raw) {
+    if (fallback) return fallback
+    throw new Error('bootstrap requires --runs-per-week independently of --days')
+  }
   return Number(raw)
 }
 
-interface ManualPaths {
-  promptPath: string
-  answerPath: string | undefined
-}
+type AdvisorChoice =
+  | { kind: 'manual'; promptPath: string; answerPath: string | undefined }
+  | { kind: 'gemini' }
 
-/** The prompt is only needed again if a pasted answer is rejected, so it has a default. */
-function manualPaths(args: string[]): ManualPaths | undefined {
+function advisorChoice(args: string[]): AdvisorChoice {
+  const advisor = option(args, '--advisor') ?? 'manual'
   const promptOut = option(args, '--prompt-out')
   const answer = option(args, '--from-answer')
-  if (!promptOut && !answer) return undefined
+
+  if (advisor === 'gemini') {
+    if (promptOut || answer) throw new Error('--advisor gemini asks the API; drop --prompt-out and --from-answer')
+    return { kind: 'gemini' }
+  }
+  if (advisor !== 'manual') throw new Error(`Unknown --advisor ${advisor}: use gemini, or leave it out for the manual prompt`)
 
   const promptPath = path.resolve(promptOut ?? path.join(option(args, '--out') ?? '.coach-previews', 'coach-prompt.md'))
-  fs.mkdirSync(path.dirname(promptPath), { recursive: true })
-  return { promptPath, answerPath: answer ? path.resolve(answer) : undefined }
+  return { kind: 'manual', promptPath, answerPath: answer ? path.resolve(answer) : undefined }
 }
 
-interface DataWorkspace {
-  root: string
-  temporaryRoot?: string
-  shouldPush: boolean
-}
-
-async function dataWorkspace(args: string[], applying: boolean): Promise<DataWorkspace> {
-  const explicit = option(args, '--data-dir') ?? process.env.RUNOMICS_DATA_DIR?.trim()
-  if (explicit) return { root: path.resolve(explicit), shouldPush: false }
-
-  if (process.env.RUNOMICS_DATA_REPO_URL) {
-    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'runomics-coach-'))
-    const root = path.join(temporaryRoot, 'data')
-    const { fetchPrivateData } = await interopImport(import('./fetch_private_data.mjs'))
-    fetchPrivateData(root)
-    return { root, temporaryRoot, shouldPush: applying }
+/** guidance.md keeps what a hand-guided block was told, so the next renewal is told it too. */
+function bootstrapGuidance(args: string[], stored: string | null): string | undefined {
+  const given = fileOption(args, '--guidance-file')
+  if (given !== undefined) {
+    console.log(`Guidance: ${option(args, '--guidance-file')}`)
+    return given
   }
-
-  if (applying) throw new Error('--apply requires private data repository credentials or an explicit --data-dir workspace')
-  return { root: path.join(process.cwd(), 'data'), shouldPush: false }
+  console.log(stored === null ? 'Guidance: none (no coaching/guidance.md)' : 'Guidance: coaching/guidance.md')
+  return stored ?? undefined
 }
 
 function printProposal(filePath: string, proposal: Awaited<ReturnType<typeof createProposal>>): void {
@@ -130,16 +134,27 @@ async function createProposal(command: string, args: string[]) {
   const { getAllActivities } = await interopImport(import('@/infrastructure/repositories/JsonActivityRepository'))
 
   const repository = new JsonCoachingRepository(process.env.RUNOMICS_DATA_DIR)
-  const manual = manualPaths(args)
-  const advisor = manual ? new ManualCoachingAdvisor(manual.promptPath, manual.answerPath) : new GeminiCoachingAdvisor()
+  const choice = advisorChoice(args)
+  if (choice.kind === 'manual') fs.mkdirSync(path.dirname(choice.promptPath), { recursive: true })
+  const advisor = choice.kind === 'manual' ? new ManualCoachingAdvisor(choice.promptPath, choice.answerPath) : new GeminiCoachingAdvisor()
   const currentPlan = repository.getCurrentPlan()
 
   if (command === 'bootstrap') {
-    const referenceDate = option(args, '--reference-date') ?? new Date().toISOString().slice(0, 10)
+    const referenceDate = option(args, '--reference-date') ?? appTodayIso()
     const context = await getCoachingContext(currentPlan, referenceDate)
     const contextOutput = option(args, '--context-out')
     if (contextOutput) fs.writeFileSync(path.resolve(contextOutput), JSON.stringify(context, null, 2) + '\n')
-    return createBootstrapProposal(context, availableDays(option(args, '--days')), { advisor, repository }, option(args, '--race'), requestedRuns(args), fileOption(args, '--guidance-file'), args.includes('--replace'), args.includes('--general'), option(args, '--start'))
+    const defaults = renewalDefaults(currentPlan, referenceDate)
+    const days = availableDays(option(args, '--days'), defaults.availableWeekdays)
+    const runs = requestedRuns(args, defaults.runsPerWeek)
+    const start = option(args, '--start') ?? defaults.start
+    const defaulted = [
+      option(args, '--days') ? null : `--days ${days.join(',')}`,
+      option(args, '--runs-per-week') ? null : `--runs-per-week ${runs}`,
+      option(args, '--start') || !start ? null : `--start ${start}`,
+    ].filter((part): part is string => part !== null)
+    if (defaulted.length) console.log(`From the current plan: ${defaulted.join(' ')}`)
+    return createBootstrapProposal(context, days, { advisor, repository }, option(args, '--race'), runs, bootstrapGuidance(args, repository.getGuidance()), args.includes('--replace'), args.includes('--general'), start)
   }
 
   if (command === 'evaluate') {
@@ -153,7 +168,7 @@ async function createProposal(command: string, args: string[]) {
   }
 
   if (command === 'weekly-review') {
-    const referenceDate = option(args, '--reference-date') ?? new Date().toISOString().slice(0, 10)
+    const referenceDate = option(args, '--reference-date') ?? appTodayIso()
     const context = await getCoachingContext(currentPlan, referenceDate)
     return createWeeklyReviewProposal(context, { advisor, repository })
   }
@@ -162,7 +177,7 @@ async function createProposal(command: string, args: string[]) {
 }
 
 async function applyPreview(args: string[], proposalPath: string): Promise<void> {
-  const workspace = await dataWorkspace(args, true)
+  const workspace = await dataWorkspace(option(args, '--data-dir'), true)
   try {
     process.env.RUNOMICS_DATA_DIR = workspace.root
     const { JsonCoachingRepository } = await interopImport(import('@/infrastructure/repositories/JsonCoachingRepository'))
@@ -174,14 +189,11 @@ async function applyPreview(args: string[], proposalPath: string): Promise<void>
     const context = await getCoachingContext(repository.getCurrentPlan(), proposal.referenceDate)
     const plan = applyCoachingProposal(proposal, repository, coachingContextHash(context))
 
-    if (workspace.shouldPush) {
-      const { pushPrivateData } = await interopImport(import('./push_private_data.mjs'))
-      pushPrivateData(workspace.root)
-    }
+    if (workspace.shouldPush) await pushWorkspace(workspace)
     console.log(`Applied ${proposal.decision.outcome}; coaching plan is now revision ${plan.revision}.`)
     if (workspace.shouldPush) console.log('Private coaching data pushed. Deployment was not triggered.')
   } finally {
-    if (workspace.temporaryRoot) fs.rmSync(workspace.temporaryRoot, { recursive: true, force: true })
+    removeWorkspace(workspace)
   }
 }
 
@@ -192,7 +204,7 @@ async function autoregulate(args: string[]): Promise<void> {
   const { JsonCoachingRepository } = await interopImport(import('@/infrastructure/repositories/JsonCoachingRepository'))
   const { getAllActivities } = await interopImport(import('@/infrastructure/repositories/JsonActivityRepository'))
   const { getCoachingContext } = await interopImport(import('@/application/coaching/GetCoachingContext'))
-  const { autoregulationReport } = await interopImport(import('@/application/coaching/autoregulation'))
+  const { autoregulationReport, fatigueBasis } = await interopImport(import('@/application/coaching/autoregulation'))
   const { createAutoregulationProposal } = await interopImport(import('@/application/coaching/workflows'))
   const { CONTROLLED_THRESHOLD, controlledThresholdHr } = await interopImport(import('@/application/coaching/controlledThreshold'))
   const { getAthleteProfile } = await interopImport(import('@/infrastructure/repositories/JsonAthleteRepository'))
@@ -201,7 +213,7 @@ async function autoregulate(args: string[]): Promise<void> {
   const repository = new JsonCoachingRepository(process.env.RUNOMICS_DATA_DIR)
   const plan = repository.getCurrentPlan()
   if (!plan) throw new Error('No current coaching plan exists')
-  const referenceDate = option(args, '--reference-date') ?? new Date().toISOString().slice(0, 10)
+  const referenceDate = option(args, '--reference-date') ?? appTodayIso()
   const report = autoregulationReport(getAllActivities(), [plan, ...repository.getArchivedPlans()], referenceDate, getOfficialRaceResults())
 
   const hr = controlledThresholdHr(getAthleteProfile().lthrBpm)
@@ -218,10 +230,14 @@ async function autoregulate(args: string[]): Promise<void> {
 
   const fatigue = report.fatigue
   if (fatigue) {
-    const run = `${fatigue.run.date} easy run ${fatigue.run.hr} bpm at ${pace(fatigue.run.paceSecPerKm)}${fatigue.run.tempC === null ? '' : `, ${fatigue.run.tempC} °C`}`
+    const gap = fatigue.run.gapSecPerKm === null ? '' : ` (${pace(fatigue.run.gapSecPerKm)} grade-adjusted)`
+    const run = `${fatigue.run.date} easy run ${fatigue.run.hr} bpm at ${pace(fatigue.run.paceSecPerKm)}${gap}${fatigue.run.tempC === null ? '' : `, ${fatigue.run.tempC} °C`}`
     console.log(fatigue.normalHr === null
       ? `\nFatigue: ${run} - ${fatigue.comparables} similar run(s), ${CONTROLLED_THRESHOLD.fatigue.minComparables} needed to judge`
-      : `\nFatigue: ${run} against a normal of ${fatigue.normalHr} over ${fatigue.comparables} similar runs - ${fatigue.flagged ? 'FLAGGED' : 'fine'}`)
+      : `\nFatigue: ${run} against a normal of ${fatigue.normalHr} over ${fatigue.comparables} runs at similar ${fatigueBasis(fatigue)} - ${fatigue.flagged ? 'FLAGGED' : 'fine'}`)
+    for (const left of fatigue.leftOut) {
+      console.log(`  ${left.date}: climbed ${Math.round(left.climbMPerKm ?? 0)} m/km with no grade-adjusted pace, so its pace says little about effort - left out`)
+    }
   }
 
   const check = report.fitnessCheck
@@ -259,10 +275,10 @@ function printPasteInstructions(promptPath: string, answerPath: string | undefin
   const bytes = fs.statSync(promptPath).size
   console.log(`\nCoaching prompt written to ${promptPath} (${Math.ceil(bytes / 1024)} KB).`)
   if (answerPath) {
-    console.log('The pasted plan was rejected; the prompt above now carries the reason.')
-    console.log(`Paste it into the same chat and overwrite ${answerPath} with the corrected reply.`)
+    console.log('The answer was rejected; the prompt above now carries the reason.')
+    console.log(`Hand it to Claude Code again and overwrite ${answerPath} with the corrected reply.`)
   } else {
-    console.log('Paste it into a chat, save the JSON reply, then run the same command again with:')
+    console.log('Hand it to Claude Code, save the JSON reply, then run the same command again with:')
     console.log('  --from-answer <path to the saved reply>')
   }
   console.log('It contains your health data - keep it out of anything you would not trust with that.')
@@ -283,7 +299,7 @@ async function main(): Promise<void> {
     return
   }
 
-  const workspace = await dataWorkspace(args, false)
+  const workspace = await dataWorkspace(option(args, '--data-dir'), false)
   try {
     process.env.RUNOMICS_DATA_DIR = workspace.root
     if (args[0] === 'autoregulate') {
@@ -297,7 +313,7 @@ async function main(): Promise<void> {
     if (!isPromptWritten(error)) throw error
     printPasteInstructions(error.promptPath, option(args, '--from-answer'))
   } finally {
-    if (workspace.temporaryRoot) fs.rmSync(workspace.temporaryRoot, { recursive: true, force: true })
+    removeWorkspace(workspace)
   }
 }
 

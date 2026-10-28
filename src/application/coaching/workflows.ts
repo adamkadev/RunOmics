@@ -1,10 +1,10 @@
-import { DAY_MS } from '@/lib/calendarDate'
+import { createHash } from 'crypto'
+import { appTodayIso, DAY_MS } from '@/lib/calendarDate'
 import { validateTrainingFrequency } from './frequency'
 import { validateAdaptation, validateBootstrapDraft } from './draftRules'
 import type { Activity } from '@/domain/activity/types'
 import {
   COACHING_SCHEMA_VERSION,
-  COACHING_TO_ACTIVITY_TYPE,
   type CoachDecision,
   type CoachPlanChange,
   type CoachState,
@@ -21,10 +21,13 @@ import {
   type WorkoutPrescription,
 } from '@/domain/coaching/types'
 import { applyCoachDecision, getFutureSnapshot } from '@/domain/coaching/lifecycle'
+import { sessionForRun } from '@/domain/coaching/sessionForRun'
 import { isoWeekWindows, weekWindowIndex } from '@/domain/coaching/weekWindows'
 import { raceDistanceMeters } from '@/domain/coaching/raceTarget'
+import { raceKey } from '@/domain/goals/entries'
+import { BOOTSTRAP_START_WINDOW_DAYS } from '@/domain/coaching/renewal'
 import { GENERAL_PREPARATION, macrocycleOf, resolveMacrocycleStart } from '@/domain/coaching/macrocycle'
-import { lighterWeekSessions, lighterWorkout, withGuide, type FatigueReading, type GuideProposal } from './autoregulation'
+import { blockGuideProposals, fatigueBasis, lighterWeekSessions, lighterWorkout, withGuide, type FatigueReading, type GuideProposal } from './autoregulation'
 import { parseCoachDecision, parseCoachingPlan, parseWorkoutEvaluation } from '@/domain/coaching/validation'
 import type { CoachingRepository } from '@/application/ports/CoachingRepository'
 import type { AdvisorRecommendation, CoachingAdvisor, CoachingPlanDraft } from '@/application/ports/CoachingAdvisor'
@@ -64,15 +67,12 @@ function provenance(source: Source, trigger: CoachingProvenance['trigger'], crea
   }
 }
 
-function raceIdentity(race: CoachingContext['upcomingRaces'][number]): string {
-  return race.garminEventUuid
-    ?? (race.garminEventId === undefined ? `${race.date}:${race.name}` : String(race.garminEventId))
-}
+const guidanceHash = (guidance: string) => createHash('sha256').update(guidance).digest('hex').slice(0, 24)
 
 function eventFromRace(race: CoachingContext['upcomingRaces'][number], role: CoachingEventRole): TargetEvent {
   const distanceMeters = raceDistanceMeters(race.distance)
   return {
-    id: raceIdentity(race),
+    id: raceKey(race),
     name: race.name,
     date: race.date,
     role,
@@ -105,10 +105,8 @@ function selectBootstrapTarget(context: CoachingContext, targetEventId?: string,
   const earliestStart = completedRaceToday && !hasPendingSameDayRace
     ? new Date(reference.getTime() + DAY_MS).toISOString().slice(0, 10)
     : context.referenceDate
-  // A block opens on a Monday at most a week out, so the days kept from the
-  // current plan fill no more than the one week before it.
   if (start !== undefined) {
-    const latest = new Date(reference.getTime() + 7 * DAY_MS).toISOString().slice(0, 10)
+    const latest = new Date(reference.getTime() + BOOTSTRAP_START_WINDOW_DAYS * DAY_MS).toISOString().slice(0, 10)
     if (start < earliestStart || start > latest || new Date(`${start}T00:00:00Z`).getUTCDay() !== 1) {
       throw new Error(`--start must be a Monday from ${earliestStart} to ${latest}, not ${start}`)
     }
@@ -118,7 +116,7 @@ function selectBootstrapTarget(context: CoachingContext, targetEventId?: string,
   const fullHorizonEnd = new Date(planningStart.getTime() + 27 * DAY_MS).toISOString().slice(0, 10)
   const overridden = targetEventId
     ? races.find((candidate) => {
-        return raceIdentity(candidate) === targetEventId || candidate.name === targetEventId
+        return raceKey(candidate) === targetEventId || candidate.name === targetEventId
       })
     : undefined
   if (targetEventId && !overridden) throw new Error(`Upcoming race not found: ${targetEventId}`)
@@ -152,7 +150,8 @@ function selectGoal(context: CoachingContext, event: TargetEvent | null): Traini
   if (!event) return { kind: 'performance', description: 'Progress running fitness over time, with no target race.' }
   const eventYear = Number(event.date.slice(0, 4))
   const annualTarget = context.goals.find((year) => year.year === eventYear)?.targets.find((candidate) => candidate.distance === event.distanceLabel)
-  const targetSeconds = event.targetSeconds ?? annualTarget?.targetSeconds
+  const justFinish = context.upcomingRaces.some((race) => raceKey(race) === event.id && race.justFinish)
+  const targetSeconds = justFinish ? undefined : event.targetSeconds ?? annualTarget?.targetSeconds
   return targetSeconds
     ? { kind: 'time', targetSeconds, description: `Run ${event.distanceLabel} in the target time.` }
     : { kind: 'finish', description: `Complete ${event.name}.` }
@@ -234,6 +233,7 @@ function normalizeBootstrapPlan(
     }
   }
   const blockStart = keptWeeks[0]?.startDate ?? strategy.planningStartDate
+  const guideProposals = strategy.primary ? [] : blockGuideProposals(context.autoregulation, normalizedWeeks.flatMap((week) => week.workouts))
   return parseCoachingPlan({
     schemaVersion: COACHING_SCHEMA_VERSION,
     id: planId,
@@ -251,6 +251,7 @@ function normalizeBootstrapPlan(
       startDate: blockStart,
       endDate: horizonEnd,
       focus: draft.focus,
+      ...(guideProposals.length ? { guideProposals } : {}),
     },
     weeks: [...keptWeeks, ...normalizedWeeks],
     provenance: provenance(source, 'bootstrap', createdAt),
@@ -420,10 +421,11 @@ function firstIntensityTarget(blocks: WorkoutBlock[]): Pick<AggregateWorkoutComp
 }
 
 function matchPrescription(plan: CoachingPlan, activity: Activity): { prescription: WorkoutPrescription | null; status: WorkoutEvaluation['matchStatus'] } {
-  const sameDate = plan.weeks.flatMap((week) => week.workouts).filter((workout) => workout.status !== 'cancelled' && workout.date === activity.date.slice(0, 10))
-  const matched = sameDate.find((workout) => COACHING_TO_ACTIVITY_TYPE[workout.type] === activity.type)
+  const workouts = plan.weeks.flatMap((week) => week.workouts)
+  const matched = sessionForRun(activity, workouts.map((prescription) => ({ prescription, activityId: null })))
   if (matched) return { prescription: matched, status: 'matched' }
-  return sameDate[0] ? { prescription: sameDate[0], status: 'date_only' } : { prescription: null, status: 'unmatched' }
+  const sameDate = workouts.find((workout) => workout.status !== 'cancelled' && workout.date === activity.date.slice(0, 10))
+  return sameDate ? { prescription: sameDate, status: 'date_only' } : { prescription: null, status: 'unmatched' }
 }
 
 function evaluationFor(
@@ -470,10 +472,11 @@ function evaluationFor(
 /** Drafts fail over wording as often as substance, so the complaint goes back with the next ask instead of the draft being thrown away. */
 const REPAIR_ATTEMPTS = 2
 
-async function draftUntilAccepted(
-  ask: (extraGuidance?: string) => Promise<CoachingPlanDraft>,
-  review: (draft: CoachingPlanDraft) => CoachingPlan,
-): Promise<CoachingPlan> {
+async function draftUntilAccepted<Draft, Accepted>(
+  ask: (extraGuidance?: string) => Promise<Draft>,
+  review: (draft: Draft) => Accepted,
+  what = 'plan',
+): Promise<Accepted> {
   let complaint: string | undefined
 
   for (let attempt = 0; ; attempt++) {
@@ -482,9 +485,13 @@ async function draftUntilAccepted(
       return review(draft)
     } catch (error) {
       if (attempt >= REPAIR_ATTEMPTS) throw error
-      complaint = `Your previous answer was rejected: ${error instanceof Error ? error.message : String(error)}\nReturn a corrected plan that satisfies this exactly, changing nothing else.`
+      complaint = `Your previous answer was rejected: ${error instanceof Error ? error.message : String(error)}\nReturn a corrected ${what} that satisfies this exactly, changing nothing else.`
     }
   }
+}
+
+function withComplaint(guidance: string | undefined, complaint: string | undefined): { guidance?: string } {
+  return guidance || complaint ? { guidance: [guidance, complaint].filter(Boolean).join('\n\n') } : {}
 }
 
 export async function createBootstrapProposal(
@@ -520,7 +527,7 @@ export async function createBootstrapProposal(
     context,
     availableWeekdays,
     runsPerWeek,
-    ...(guidance || extraGuidance ? { guidance: [guidance, extraGuidance].filter(Boolean).join('\n\n') } : {}),
+    ...withComplaint(guidance, extraGuidance),
     planningStartDate: strategy.planningStartDate,
     primaryTargetEvent: strategy.primary,
     tuneUpEvents: strategy.tuneUps,
@@ -530,7 +537,7 @@ export async function createBootstrapProposal(
   })
 
   const review = (draft: CoachingPlanDraft) => {
-    validateBootstrapDraft(draft, { availableWeekdays, runsPerWeek, context, events: strategy })
+    validateBootstrapDraft(draft, { availableWeekdays, runsPerWeek, context, events: strategy, ...(guidance ? { guidance } : {}) })
     return normalizeBootstrapPlan(draft, context, strategy, createdAt, id, macrocycleStartDate, sourceOf(services), carried)
   }
 
@@ -553,7 +560,10 @@ export async function createBootstrapProposal(
       : 'Created a general preparation block with no target race.',
     evidence: [],
     changes: [{ kind: 'replace_future', effectiveDate: strategy.planningStartDate, beforeWeeks: [], afterWeeks: proposedPlan.weeks }],
-    provenance: provenance(sourceOf(services), 'bootstrap', createdAt),
+    provenance: {
+      ...provenance(sourceOf(services), 'bootstrap', createdAt),
+      ...(guidance ? { guidanceHash: guidanceHash(guidance) } : {}),
+    },
   })
   return {
     schemaVersion: 1,
@@ -585,14 +595,23 @@ async function createAdaptationProposal(
     ? new Date(new Date(`${activity.date.slice(0, 10)}T00:00:00Z`).getTime() + DAY_MS).toISOString().slice(0, 10)
     : null
   const effectiveDate = kind === 'post_activity' && dayAfterActivity
-    ? [dayAfterActivity, now.toISOString().slice(0, 10)].sort().at(-1)!
+    ? [dayAfterActivity, appTodayIso(now)].sort().at(-1)!
     : context.referenceDate
   const matched = activity ? matchPrescription(plan, activity).prescription : null
-  const advice = kind === 'post_activity' && activity
-    ? await services.advisor.evaluateActivity({ context, activity, prescription: matched })
-    : await services.advisor.reviewWeek({ context })
-  const decision = decisionFromAdvice(advice, plan, sourceOf(services), kind, effectiveDate, createdAt, id(), id)
-  validateAdaptation(plan, applyCoachDecision(plan, decision), context)
+  const guidance = services.repository.getGuidance?.() ?? undefined
+  const told = guidance ? { guidance } : {}
+  const ask = (complaint?: string) => {
+    const request = { context, effectiveDate, ...withComplaint(guidance, complaint) }
+    return kind === 'post_activity' && activity
+      ? services.advisor.evaluateActivity({ ...request, activity, prescription: matched })
+      : services.advisor.reviewWeek(request)
+  }
+  const review = (advice: AdvisorRecommendation) => {
+    const decision = decisionFromAdvice(advice, plan, sourceOf(services), kind, effectiveDate, createdAt, id(), id)
+    validateAdaptation(plan, applyCoachDecision(plan, decision), context, told)
+    return decision
+  }
+  const decision = await draftUntilAccepted(ask, review, 'recommendation')
   const hash = coachingContextHash(context)
   const evaluation = activity ? evaluationFor(plan, activity, decision, hash, createdAt, id, sourceOf(services)) : undefined
   return {
@@ -658,13 +677,16 @@ function lighterWeekAdvice(plan: CoachingPlan, fatigue: FatigueReading, referenc
     delete recounted.totalDurationSeconds
     return [{ kind: 'upsert_workout' as const, workoutId: workout.id, workout: { ...recounted, ...calculatedTotals(recounted.blocks) } }]
   })
+  const { run } = fatigue
+  const gap = run.gapSecPerKm === null ? '' : ` (${paceLabel(Math.round(run.gapSecPerKm))} grade-adjusted)`
+  const temperature = run.tempC === null ? '' : `, ${run.tempC} °C`
   return {
     outcome: 'ADJUST',
     reasonCodes: ['EASY_RUN_HR_ABOVE_NORMAL'],
     summary: `A lighter week: easy-run heart rate is ${Math.round(fatigue.run.hr - fatigue.normalHr!)} bpm above the recent normal. Controlled threshold time down by about a third, easy running by about a fifth, every run kept.`,
     evidence: [{
       code: 'EASY_RUN_HR',
-      message: `${fatigue.run.date}: ${fatigue.run.hr} bpm at ${paceLabel(Math.round(fatigue.run.paceSecPerKm))}${fatigue.run.tempC === null ? '' : `, ${fatigue.run.tempC} °C`}, against a normal of ${fatigue.normalHr} bpm over ${fatigue.comparables} similar runs`,
+      message: `${run.date}: ${run.hr} bpm at ${paceLabel(Math.round(run.paceSecPerKm))}${gap}${temperature}, against a normal of ${fatigue.normalHr} bpm over ${fatigue.comparables} runs at similar ${fatigueBasis(fatigue)}`,
       value: fatigue.run.hr - fatigue.normalHr!,
       unit: 'bpm',
     }],

@@ -1,7 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { handleInternalRoute } from '@/lib/internalRoute'
-import { sendPush } from '@/lib/sendPushNotification'
-import { t } from '@/i18n'
+import { opsStrings, sendOpsPush } from '@/lib/opsPush'
 
 const MAX_LENGTH = 200
 const RUN_URL_PREFIX = 'https://github.com/'
@@ -46,7 +45,12 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    await sendPush('always', t.notifications.workflowFailed.title(workflow), t.notifications.workflowFailed.body(runUrl))
+    await sendOpsPush({
+      title: opsStrings.workflowFailed.title(workflow),
+      body: opsStrings.workflowFailed.body(runUrl),
+      link: runUrl,
+      tag: `workflow-failure:${workflow}`,
+    })
     return NextResponse.json({ sent: true })
   })
 }

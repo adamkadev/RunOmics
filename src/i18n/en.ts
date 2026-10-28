@@ -1,4 +1,4 @@
-import type { ActivityType } from '@/domain/activity/types'
+import type { ActivityType, HrDistrust } from '@/domain/activity/types'
 import type { NiggleSide, NiggleSite } from '@/domain/wellness/checkIn'
 
 function ordinal(n: number): string {
@@ -181,6 +181,8 @@ export const en = {
       current: 'In progress',
       runsColumn: 'runs',
       seeRuns: (runs: number) => (runs === 1 ? 'See the run in Activities' : `See the ${runs} runs in Activities`),
+      prevMonth: 'Previous month',
+      nextMonth: 'Next month',
       close: 'Close',
     },
     empty: 'No runs yet.',
@@ -239,6 +241,7 @@ export const en = {
   pwa: {
     updateAvailable: 'A new version of RunOmics is ready.',
     refresh: 'Refresh',
+    dismiss: 'Dismiss',
   },
 
   signIn: {
@@ -294,6 +297,7 @@ export const en = {
       exitFullscreen: 'Exit fullscreen',
       less: 'Rare',
       more: 'Frequent',
+      tracksFailed: 'Your runs couldn’t load.',
       noRoutes: 'No routes for this filter',
       loadFailed: 'The map couldn’t load.',
       mapUnavailable: 'Map unavailable - no map token configured',
@@ -390,6 +394,50 @@ export const en = {
         flatForReps: 'Flat for the reps',
         // The options row's summary, "Loop · Avoid busy roads · New streets first": one line on a 393 pt phone.
         summary: { avoidBusyRoads: 'Avoid busy roads', newStreetsFirst: 'New streets first', flatForReps: 'Flat' },
+        // The climb a loop may hold for the day's session. `max` and `perKm` are whole metres a km, "20".
+        climb: {
+          sessions: {
+            quality: 'Quality day',
+            beforeQuality: 'Before a quality day',
+            recovery: 'Recovery run',
+            long: 'Long run',
+            easy: 'Easy run',
+            none: 'No session planned',
+          },
+          upTo: (session: string, max: string) => `${session} · up to ${max} m/km of climb`,
+          within: (session: string, perKm: string, max: string) => `${session} · ${perKm} of ${max} m/km of climb`,
+          over: (session: string, perKm: string, max: string) => `${session} · ${perKm} m/km of climb, over ${max}`,
+          flat: (session: string) => `${session} · as flat as it gets`,
+          flatLoop: (session: string, perKm: string) => `${session} · ${perKm} m/km of climb, flat wanted`,
+        },
+        // When the run would end after dusk or start before dawn. `time` is "17:27" on the athlete's clock.
+        dark: {
+          dusk: (time: string) => `Sunset ${time} · streets first after dark`,
+          dawn: (time: string) => `Dark until ${time} · streets first`,
+          night: 'Dark all day · streets first',
+        },
+        // `pct` is "18%".
+        trailShare: (pct: string) => `${pct} on trails or unpaved ground`,
+        steepHint: 'Steep climbs: walk them to keep it easy',
+        // Places the owner marks for loops to go around: a fallen tree, a flooded path.
+        avoid: {
+          title: 'Spots to avoid',
+          mark: 'Mark a spot',
+          cancel: 'Cancel',
+          markPrompt: 'Tap the map where loops must not go.',
+          // A spot's row. `date` is "26 Oct".
+          marked: (date: string) => `Marked ${date}`,
+          // A spot whose reason wears off: "Marked 26 Oct · until 16 Nov".
+          markedUntil: (date: string, until: string) => `Marked ${date} · until ${until}`,
+          locate: (date: string) => `Show the spot marked ${date} on the map`,
+          radius: 'Size',
+          radiusM: (m: string) => `${m} m`,
+          full: (max: number) => `${max} spots is the most. Remove one to mark another.`,
+          reason: 'Reason',
+          reasons: { none: 'No reason', blocked: 'Blocked', mud: 'Muddy', unsafe: 'Unsafe' },
+          remove: 'Remove spot',
+          failed: 'That change wasn’t saved. Try again.',
+        },
         distanceStat: 'Distance',
         timeStat: 'Time',
         // Under the time: the pace it is worked out at, "5:50".
@@ -405,6 +453,7 @@ export const en = {
         retry: 'Try again',
         errors: {
           notConfigured: 'Route generation isn’t set up on this deployment.',
+          tracks: 'Your runs couldn’t load, so no loop can be scored.',
           auth: 'Sign in as the owner to plan routes.',
           rateLimited: 'Too many requests. Try again in a minute.',
           dailyQuota: 'Today’s route quota is used up.',
@@ -459,6 +508,65 @@ export const en = {
       data: 'Data',
       notifications: 'Notifications',
       diagnostics: 'Diagnostics',
+      goalsRaces: 'Races & goals',
+    },
+    // Owner only: races and season goals, kept in Firestore and mirrored into the data by the nightly sync.
+    goalsRaces: {
+      loading: 'Loading…',
+      loadFailed: 'Your races and goals couldn’t be loaded.',
+      retry: 'Retry',
+      noRace: 'No race ahead. Add one to give the plan a target.',
+      addRace: 'Add a race',
+      editRace: 'Edit race',
+      justFinish: 'Just finish',
+      season: (year: number) => `${year} season`,
+      noGoal: 'No goal set',
+      annualKm: (km: string) => `${km} km`,
+      targetCount: (n: number) => `${n} target${n === 1 ? '' : 's'}`,
+      whenApplied: 'Plan, Today, the race page and the coach pick up changes at the next sync.',
+      added: 'Race added',
+      saved: 'Saved',
+      removed: 'Removed',
+      saveFailed: 'Couldn’t save. Check your connection and try again.',
+      removeRace: 'Remove this race',
+      hideGarminRace: 'Remove this race (it stays in Garmin Connect)',
+      confirmRemove: 'Tap again to remove',
+      clearGoals: (year: number) => `Clear the ${year} goals`,
+      priorityName: (priority: 'A' | 'B' | 'C') => `Priority ${priority}`,
+      priorityHint: {
+        A: 'A: the race the block builds to.',
+        B: 'B: raced for real, with a short taper.',
+        C: 'C: a tune-up, run as training.',
+      },
+      targetKind: { none: 'No target', time: 'Time', finish: 'Finish' },
+      fields: {
+        name: 'Name',
+        namePlaceholder: 'Harbor 10K',
+        date: 'Date',
+        distance: 'Distance',
+        otherDistance: 'Other',
+        kmPlaceholder: 'km, e.g. 15',
+        distanceHint: 'From 1 to 250 km.',
+        goal: 'Goal',
+        timeGoal: 'Time',
+        timePlaceholder: 'h:mm:ss or mm:ss',
+        timeHint: 'Finish time, e.g. 45:00 or 1:39:30.',
+        priority: 'Priority',
+        location: 'Place',
+        optional: 'Optional',
+        annualKm: 'Distance for the year (km)',
+        annualKmHint: 'Leave empty for no distance goal.',
+      },
+      errors: {
+        nameRequired: 'Give the race a name.',
+        nameTooLong: 'Keep the name under 80 characters.',
+        dateInvalid: 'Pick a date.',
+        datePast: 'A new race has to be today or later.',
+        dateTooFar: 'Pick a date within five years.',
+        distanceRange: 'Enter a distance from 1 to 250 km.',
+        timeInvalid: 'Write the time as h:mm:ss or mm:ss.',
+        paceRange: 'That time gives a pace no one runs: check it.',
+      },
     },
     // What failed on a phone, sent by the app itself (never a location): the last fifty, newest first.
     diagnostics: {
@@ -466,6 +574,36 @@ export const en = {
       loading: 'Loading…',
       none: 'No errors recorded.',
       loadFailed: 'The errors couldn’t be loaded.',
+      // Each server job's latest run, kept in Firestore: Vercel's own log lasts half an hour.
+      scheduledJobs: 'Scheduled jobs: last run and outcome',
+      jobsNone: 'No run recorded yet.',
+      jobsLoadFailed: 'The runs couldn’t be loaded.',
+      outcome: { sent: 'Done', skipped: 'Nothing to do', error: 'Failed' },
+      trigger: { cron: 'cron', manual: 'by hand', sync: 'sync' },
+      ai: {
+        title: 'Last AI pass',
+        counts: (generated: number, missed: number) => `${generated} written · ${missed} left`,
+        idleNights: (nights: number) => `nothing written for ${nights} night${nights === 1 ? '' : 's'}`,
+        closed: (model: string, reason: string) => `${model} closed: ${reason}`,
+      },
+      garminSeries: {
+        title: 'Garmin data: newest sample per series',
+        allCurrent: 'All current',
+        stopped: (count: number) => `${count} stopped`,
+        never: 'Never received',
+        newest: (date: string) => `Last sample ${date}`,
+        staleSince: (date: string) => `Nothing new since ${date}`,
+        warnings: (count: number, steps: string) => `Last full sync: ${count} Garmin request${count === 1 ? '' : 's'} failed (${steps})`,
+        names: {
+          trainingStatus: 'Training status',
+          loadBalance: 'Load balance',
+          restingHr: 'Resting HR',
+          racePredictions: 'Race predictions',
+          vo2max: 'VO2max',
+          fitnessAge: 'Fitness age',
+          threshold: 'Threshold',
+        },
+      },
     },
     sync: {
       subtitle: 'Pull in today’s runs without waiting for tonight.',
@@ -581,6 +719,11 @@ export const en = {
     },
     notifications: {
       error: 'Could not update notification settings, please retry.',
+      // The app's start-up refresh of this device's push token failed: the switches may be on while nothing arrives.
+      notRegistered: 'Not registered on this device. Turn a switch off and on again to retry.',
+      // Safari offers push only to a web app opened from the Home Screen.
+      unsupported: 'Add RunOmics to your Home Screen to receive notifications.',
+      denied: 'Notifications blocked: allow them in Settings → Notifications → RunOmics.',
       // The daily reminder's time beside its switch: "08:00".
       at: (hour: number, minute: string) => `${String(hour).padStart(2, '0')}:${minute}`,
       types: {
@@ -594,6 +737,8 @@ export const en = {
   dashboard: {
     // Today's page header: the date over the title.
     headerDate: (weekday: string, date: string) => `${weekday}, ${date}`,
+    // A Home Screen app resumed after midnight still shows the day it was opened on.
+    stalePage: 'Yesterday’s page, refresh',
     readiness: {
       open: 'Open Load in Analytics',
       // Everyday words, not acronyms.
@@ -618,6 +763,10 @@ export const en = {
         in: 'Load in range',
         above: 'Load above range',
       },
+      // Said in place of the load line while a break has left nothing to read it against.
+      buildingBack: 'Building back - no reading yet',
+      // "Estimated" where the watch rates no load and the app did the arithmetic itself.
+      loadLine: (state: string, estimated: boolean) => (estimated ? `${state} · Estimated` : state),
       ctl: 'Fitness',
       atl: 'Fatigue',
       // "↘ 2 this week" under a tile.
@@ -709,12 +858,8 @@ export const en = {
   },
 
   analytics: {
-    // Which load model a card reads, named in its head: the watch's
-    // acute/chronic load, or the app's own stress (Fitness / Fatigue).
-    model: { garmin: 'Your watch' },
     title: 'Analytics',
 
-    aboutChart: 'What this chart measures',
     // Named for what each tab holds, in whole words.
     tabs: {
       fitness: 'Load',
@@ -839,6 +984,7 @@ export const en = {
         check: 'Check',
       },
       loadTrend: {
+        aboutEstimated: 'Your acute load: the last 7 days of training load, which the app works out from each run’s heart rate and time as your watch sends none, day by day (weekly averages on a year). The band is your safe range, 0.8–1.3 × your chronic 28-day load; days outside it are marked. The Load ratio under Injury risk is the last point divided by its chronic load.',
         about: 'Your acute load: the last 7 days of training load from your watch, day by day (weekly averages on a year). The band is your safe range, 0.8–1.3 × your chronic 28-day load; days outside it are marked. The Load ratio under Injury risk is the last point divided by its chronic load.',
         ratioSafe: (lo: number, hi: number) => `ratio · safe ${lo}–${hi}`,
         span: (days: number) => (days < 14 ? (days === 1 ? '1 day' : `${days} days`) : Math.round(days / 7) === 1 ? '1 week' : `${Math.round(days / 7)} weeks`),
@@ -859,9 +1005,11 @@ export const en = {
       status: {
         title: 'Training status',
         caption: (span: string) => `Your watch · ${span}`,
+        captionEstimated: (span: string) => `Estimated · ${span}`,
         span: { days28: '28 days', weeks12: '12 weeks', months12: '12 months' },
         spanLive: { days28: 'last 28 days', weeks12: 'last 12 weeks', months12: 'last 12 months' },
         about: "Your watch's training status: how your recent load compares with what your body is used to. Each cell is one day (one week on longer periods).",
+        aboutEstimated: "Your watch rates no training status, so the app estimates one from your heart-rate load: how your recent load compares with what your body is used to. Each cell is one day (one week on longer periods).",
         sentenceToday: (count: number, days: number) => ` today, and on ${count} of the last ${days} days.`,
         sentenceOn: (date: string, count: number, days: number) => ` on ${date}, and on ${count} of those ${days} days.`,
         days: (n: number) => `${n} d`,
@@ -1099,16 +1247,6 @@ export const en = {
           flat: (metric: string) => `${metric} is holding steady across this window.`,
         },
       },
-      threshold: {
-        title: 'Lactate threshold',
-        pace: 'Threshold pace',
-        lthr: 'Threshold HR',
-        footnote: 'The effort you can hold before lactate builds up, as the watch measures it. The watch revises it every few weeks, so the line steps rather than drifts.',
-        reading: {
-          change: (delta: string, since: string) => `Threshold pace is ${delta} since ${since}.`,
-          flat: (since: string) => `Threshold pace is unchanged since ${since}.`,
-        },
-      },
     },
   },
 
@@ -1272,9 +1410,6 @@ export const en = {
       prBadge: 'PR',
       rankBadge: (rank: number) => `#${rank}`,
     },
-    achievements: {
-      title: 'Achievements from this run',
-    },
     // The home area's quartiers this run reached into first.
     newGround: {
       title: 'New ground',
@@ -1304,6 +1439,11 @@ export const en = {
     },
     dataQuality: {
       estimated: 'Estimated',
+      hrUntrusted: {
+        marked: 'HR unreliable · load from effort',
+        beforeReliable: 'HR before the strap · load from effort',
+        wrist: 'Wrist HR · load from effort',
+      } satisfies Record<HrDistrust, string>,
     },
     similarRuns: {
       summary: (n: number, rank: number) =>
@@ -1330,6 +1470,8 @@ export const en = {
       usedBefore: 'Used before',
       removeTag: (tag: string) => `Remove tag ${tag}`,
       addTag: (tag: string) => `Add tag ${tag}`,
+      hrUnreliable: 'HR unreliable',
+      hrUnreliableHint: 'Leaves this run’s heart rate out of load, zones and efficiency from the next sync. Load is then estimated from effort.',
     },
     zones: {
       short: 'Heart-rate zones',
@@ -1357,6 +1499,11 @@ export const en = {
       // One way out to the watch's own app; the brand lives in the URL alone.
       changeInGarmin: (name: string) => `${name} - edit in your watch app`,
       addInGarmin: 'Set the shoe in your watch app',
+      change: (name: string) => `${name} - change shoe`,
+      sheetTitle: 'Shoe for this run',
+      clearPick: 'Use the shoe from Garmin',
+      countsAfterSync: 'The shoe’s mileage counts the change after the next sync.',
+      saved: 'Saved. Mileage updates after the next sync.',
     },
     weather: {
       conditions: {
@@ -1409,7 +1556,7 @@ export const en = {
       gap: 'GAP',
       gapReading: (pace: string) => `GAP ${pace}`,
       paceUnitHint: '/km, up = faster',
-      paceZonesEstimated: 'Pace zones estimated by VDOT: the watch gives no threshold pace.',
+      paceZonesEstimated: 'Pace zones estimated by VDOT: the watch gives no current threshold pace.',
       elevation: 'Elevation',
       cadence: 'Cadence',
       elevationGain: (m: string) => `+${m} m gain`,
@@ -1498,6 +1645,9 @@ export const en = {
     // The compact top bar's, short enough to sit beside the ‹ 2026 › stepper.
     barTitle: 'Goals',
     empty: 'No goals configured yet.',
+    emptyHow: 'Set a distance for the year, target times and your races in Settings → Races & goals.',
+    emptyAction: 'Open Races & goals',
+    noGoalYear: (year: number) => `No goal set for ${year}`,
     back: 'Progress',
     // The ‹ 2026 › stepper's arrows.
     prevYear: 'Previous year',
@@ -1594,6 +1744,13 @@ export const en = {
   },
 
   shoes: {
+    defaultShoe: {
+      label: 'Default shoe',
+      none: 'None',
+      hint: 'Counts every run Garmin gives no shoe, from the pair’s first use. Mileage follows after the next sync.',
+      saved: 'Saved. Mileage updates after the next sync.',
+    },
+    listCheckedAt: (date: string) => `Shoe list last refreshed from Garmin on ${date}`,
     tracked: (km: string) => `${km} km tracked`,
     addLabel: 'Add a pair in your watch app',
     edit: 'Edit shoe',
@@ -1738,6 +1895,14 @@ export const en = {
       shortAtPace: (km: string) => `${km} km short at this pace`,
       overAtPace: (km: string) => `${km} km over at this pace`,
       noRace: 'No race planned',
+      // The race card's stand-in while no race is planned: the coach's block.
+      currentBlock: 'Current block',
+      blockWeek: (week: number, total: number) => `Week ${week} of ${total}`,
+      blockSessions: (done: number, planned: number) => `${done} of ${planned} sessions done`,
+      // The year card without a goal: it opens the years, not an empty Goals.
+      thisYear: 'This year',
+      athleteZones: 'Athlete & zones',
+      athleteZonesDetail: 'Heart-rate and pace zones, VO₂ max',
       noRecords: 'No records yet',
       onPace: 'On pace for the goal.',
       // The tiles under the records.
@@ -1795,7 +1960,7 @@ export const en = {
       // The verdict's own target, Analytics' 80/20 (see intensityMix).
       totalLine: (duration: string) => `${duration} total · aim for 80 / 20`,
       soFar: 'this week so far',
-      estimatedPaces: (effort: string, date: string) => `Paces estimated by VDOT from your ${effort} on ${date}: the watch gives no threshold pace.`,
+      estimatedPaces: (effort: string, date: string) => `Paces estimated by VDOT from your ${effort} on ${date}: the watch gives no current threshold pace.`,
     },
   },
 
@@ -1856,6 +2021,34 @@ export const en = {
     findRace: (distance: string) => `Find a ${distance.toLowerCase()} ›`,
   },
 
+  // Progress since the end of the latest long break in athlete.json (trainingBreaks).
+  returnProgress: {
+    milestones: {
+      continuous10: 'First 10 minutes non-stop',
+      continuous20: 'First 20 minutes non-stop',
+      continuous30: 'First 30 minutes non-stop',
+      nonstop3k: 'First 3 km without walking',
+      nonstop5k: 'First 5 km without walking',
+      blockCompleted: 'First block completed',
+    },
+    tab: 'Comeback',
+    since: (date: string) => `Since your return on ${date}`,
+    longest: 'Longest non-stop run',
+    reached: 'Reached',
+    next: 'Still ahead',
+    cardTitle: 'Your return',
+    runningPerWeek: 'Minutes running per week',
+    // A bar's label: the week's Monday.
+    weekOf: (date: string) => `Week of ${date}`,
+    minutes: (n: number) => `${n} min`,
+    nothingYet: 'No run since the return yet.',
+    celebration: 'Since your return',
+    push: {
+      title: 'A milestone since your return',
+      body: (label: string) => `${label}!`,
+    },
+  },
+
   pbAlerts: {
     off: (diff: string) => `${diff} off your PR`,
   },
@@ -1885,7 +2078,7 @@ export const en = {
       body: (hours: number) => `Your last sync was ${hours}h ago - check that sync is still running.`,
     },
     newActivity: { title: (name: string) => `New activity: ${name}` },
-    // Monday's look back, two short lines: what fits an iPhone notification unexpanded.
+    // The focus is never cut: iOS truncates the unexpanded notification, and expanding it must show the whole sentence.
     weeklyDigest: {
       title: 'Last week',
       km: (ran: string) => `${ran} km`,
@@ -1896,28 +2089,66 @@ export const en = {
       restingHr: (bpm: number, change: string) => `Resting HR ${bpm} (${change})`,
       focus: (focus: string) => `This week: ${focus}`,
     },
+    goalYear: {
+      title: (year: number) => `No goal set for ${year}`,
+      body: 'Set it in Settings → Races & goals to keep the Friday goal check-in.',
+    },
     weeklyGoal: {
       title: 'Weekly goal check-in',
       status: { ahead: 'ahead of pace', on_track: 'on track', behind: 'behind pace' },
       body: (status: string, rate: string, needed: string) => `You're ${status} at ${rate} km/week (need ${needed} km/week).`,
     },
+    // An alert another deployment raised, named by its athlete so two deployments never read alike.
+    forwarded: (from: string, title: string) => `${from} · ${title}`,
+    coachBlock: {
+      title: 'Coaching block',
+      endsIn: (days: number) => (days === 0 ? 'the block ends today' : days === 1 ? 'the block ends tomorrow' : `the block ends in ${days} days`),
+      reviewAge: (days: number) => `no weekly review for ${days} days`,
+      reviewNever: 'no weekly review yet',
+      body: (reasons: string) => `${reasons.charAt(0).toUpperCase()}${reasons.slice(1)}. Plan the next block and sync it to the watch.`,
+    },
     workflowFailed: {
       title: (workflow: string) => `${workflow} failed`,
       body: (runUrl: string) => `Open the run: ${runUrl}`,
     },
-    // The nightly digest of what failed on a phone, never one push per error: anyone may post an error.
+    // The nightly digest of what failed on a phone or in a server job, never one push per error: anyone may post an error.
     clientErrors: {
-      title: (count: number) => `${count} error${count === 1 ? '' : 's'} on your phone`,
+      title: (phone: number, server: number) =>
+        [
+          phone > 0 ? `${phone} error${phone === 1 ? '' : 's'} on your phone` : null,
+          server > 0 ? `${server} server error${server === 1 ? '' : 's'}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
       body: (message: string) => `Latest: ${message}. Settings → Diagnostics has them all.`,
+      serverError: (route: string, error: string) => `${route} failed (${error})`,
     },
     exploreComplete: {
       title: (name: string) => `${name} explored`,
       body: (pct: string, done: number, total: number) => `${pct} of its streets run. ${done} of ${total} quartiers complete.`,
     },
+    aiIdle: {
+      title: (nights: number) => `No AI copy written for ${nights} nights`,
+      body: (closed: string) =>
+        closed ? `Gemini closed ${closed}. The app shows rule-based copy until a model answers again.` : 'Every pass left its work undone. The app shows rule-based copy until a model answers again.',
+    },
+    syncDispatchRefused: {
+      title: 'Nightly sync did not start',
+      body: (status: number) => `GitHub refused its dispatch (${status}). Check the Sync button token and repository in Vercel.`,
+    },
     tokenExpiring: {
       names: { dataActions: 'the data token (GitHub Actions)', dataVercel: 'the data token (Vercel)', syncVercel: 'the Sync button token (Vercel)' },
       title: (days: number) => (days <= 0 ? 'A GitHub token expires today' : `A GitHub token expires in ${days} day${days === 1 ? '' : 's'}`),
       body: (names: string) => `Renew ${names} before the sync stops: GitHub → Settings → Developer settings → Fine-grained tokens.`,
+    },
+    connectExpired: {
+      title: 'Garmin Connect has stopped',
+      body: (since: string) =>
+        `The Garmin Connect token expired on ${since}. Runs still sync through the Personal API; shoes, the calendar, training status and race predictions do not. Mint a new one with scripts/get_secret.py: docs/data-and-sync.md, Connect token expiry.`,
+    },
+    garminKeyExpiring: {
+      title: (days: number) => (days <= 0 ? 'The Garmin key expires today' : `The Garmin key expires in ${days} day${days === 1 ? '' : 's'}`),
+      body: 'Create a new key at connect.garmin.com/app/settings/personalApiToken, then update GARMIN_PERSONAL_API_KEY and GARMIN_PERSONAL_API_KEY_EXPIRES in the GitHub Environment.',
     },
   },
 
@@ -1943,6 +2174,15 @@ export const en = {
     pace: 'Pace',
     finish: 'Finish',
     none: 'No race coming up. Add one in Garmin Connect and it shows here after the next sync.',
+    // Form (fitness minus fatigue) carried to race day by the sessions planned before it.
+    formTitle: 'Form on race day',
+    formToday: (tsb: string) => `Today ${tsb}.`,
+    formCaption: 'Projected from the sessions planned up to the race, at the load your runs of each type carry.',
+    formRaceDay: 'Race day',
+    formShortHistory: (days: number, needed: number) =>
+      `Not enough running yet to forecast it: fitness reads ${needed} days of training, ${days} so far since the start or the last long break.`,
+    formNoPlan: 'No sessions planned up to the race yet, so there is nothing to forecast it from.',
+    formPlanShort: (date: string) => `The plan stops on ${date}: the forecast waits for sessions up to the race week.`,
   },
 
   nextRace: {
@@ -2087,7 +2327,6 @@ export const en = {
     nextPeriod: 'Next',
     weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
     switcher: { week: 'Week', month: 'Month' },
-    planned: 'Planned',
     easyEffortLabel: 'Z2 easy',
     openPlanner: 'Open the weekly planner',
     // One reading of a session for Today, Plan and the bar (workoutSummary).
@@ -2113,6 +2352,8 @@ export const en = {
       eyebrow: 'Rest',
       title: 'Rest day',
       next: (weekday: string) => `Next: ${weekday}`,
+      finishedEyebrow: 'Block finished',
+      finished: (done: number, total: number) => `${done} of ${total} sessions`,
     },
     comingUp: {
       title: 'Coming up',
@@ -2136,6 +2377,9 @@ export const en = {
       generalShort: 'General prep',
       raceInWeeks: (race: string, weeks: number) => `${race} in ${weeks} wk`,
       raceInDays: (race: string, days: number) => (days === 0 ? `${race} today` : days === 1 ? `${race} tomorrow` : `${race} in ${days} days`),
+      guideProposal: (reps: string, from: string, to: string, source: string) => `Pace guide proposed for ${reps}: ${from} → ${to} /km, ${source}`,
+      repClass: { long: 'long reps', medium: 'medium reps', short: 'short reps' },
+      proposalSource: { sessions: 'two sessions agree', fitness_check: 'from the 5K check' },
     },
     weekRow: {
       kmOf: (km: string) => `/ ${km} km`,
@@ -2159,6 +2403,8 @@ export const en = {
       warmup: 'Warm-up',
       cooldown: 'Cool-down',
       easy: 'easy',
+      // A warm-up, cool-down or break walked, not jogged.
+      walk: 'walk',
       minutes: (m: number) => `${m}′`,
       reps: (n: number, rep: string, kind: string) => `${n} × ${rep} ${kind}`,
       strides: (n: number, rep: string) => `${n} × ${rep} strides`,
@@ -2173,6 +2419,12 @@ export const en = {
       done: 'Done',
       notPlanned: 'Nothing planned',
       asPlanned: 'As planned',
+      fit: { shorter: 'Shorter than planned', longer: 'Longer than planned', harder: 'Harder than planned', easier: 'Easier than planned' },
+      // A session run a day early or late: on its own day, and on the day it was run.
+      ranOn: (weekday: string) => `Run ${weekday}`,
+      standsFor: (weekday: string) => `${weekday}'s session`,
+      skipReasons: { ill: 'Ill', rest: 'Rest', life: 'Life' },
+      skippedFor: (reason: string) => `Skipped · ${reason}`,
       viewActivity: 'View activity',
       viewNamed: (name: string) => `View ${name}`,
     },
@@ -2180,12 +2432,7 @@ export const en = {
     row: {
       pace: (range: string) => `${range} /km`,
       recovery: (clock: string) => `${clock} rec`,
-    },
-    raceFooter: {
-      targetTime: (clock: string) => `target ${clock}`,
-      primaryTarget: 'primary',
-      tuneUp: 'tune-up',
-      blockEndsHere: 'block end',
+      walk: (clock: string) => `${clock} walk`,
     },
     weekPurpose: {
       prePlan: 'Pre-plan',
@@ -2203,14 +2450,6 @@ export const en = {
   },
 
   coaching: {
-    garminOutOfDate: 'Watch data out of date',
-    states: {
-      prescribed: 'Prescribed',
-      adjusted: 'Adjusted',
-      completed: 'Completed',
-      missed: 'Missed',
-      cancelled: 'Cancelled',
-    },
     outcomes: { KEEP: 'Keep', ADJUST: 'Adjust', REPLAN: 'Replan' },
     planned: 'Planned',
     actual: 'Actual',
@@ -2242,21 +2481,6 @@ export const en = {
       band: (target: number, ceiling: number) => `Target ${target} · ceiling ${ceiling}`,
       cols: { rep: '#', pace: 'Pace', hr: 'HR', peak: 'Peak' },
       footnote: (minute: number, guide: string) => `Heart rate lags, so each rep is read from minute ${minute}. Pace guide ${guide} /km.`,
-    },
-    readout: {
-      title: 'Coach',
-      triggers: { bootstrap: 'new block', post_activity: 'after a run', weekly_review: 'weekly review', autoregulation: 'autoregulation' },
-      lastRun: 'Last run',
-      threshold: 'Threshold',
-      paceGuide: 'Pace guide',
-      guideChange: (from: string, to: string) => `${from} → ${to} /km`,
-      proposed: (reps: string) => `${reps} · proposed, not applied.`,
-      easyRuns: 'Easy runs',
-      fatigue: (bpm: number) => `Heart rate ${bpm} bpm above your normal: a lighter week is proposed.`,
-      fitnessCheck: '5K check',
-      check: (date: string, pace: string, threshold: string) => `${date} · ${pace} · threshold ${threshold}`,
-      checkGuides: 'The next block’s guides come from it.',
-      nextKey: 'Next key',
     },
   },
 
@@ -2333,6 +2557,71 @@ export const en = {
     line: (temp: number, time: string, cost: number) =>
       `${temp} °C at ${time} — your runs at this heat cost about +${cost} s/km: run by heart rate`,
     time: (hour: number) => `${String(hour).padStart(2, '0')}:00`,
+  },
+
+  // The training workbook's Guide and Context sheets; column and item keys stay English.
+  workbook: {
+    sections: {
+      export: 'Export',
+      usage: 'Usage',
+      privacy: 'Privacy',
+      notes: 'Notes',
+      caveat: 'Caveat',
+      sheet: 'Sheet',
+      goal: 'Goal',
+      availability: 'Availability',
+      currentBlock: 'Current block',
+      upcomingRace: 'Upcoming race',
+      injuries: 'Injuries',
+      trainingBreaks: 'Training breaks',
+    },
+    guide: {
+      source: 'Runomics training data',
+      intended_audience: 'Athlete, running coach, or LLM-based training analysis',
+      missing_values: 'Blank cells mean the source did not provide a reliable value.',
+      units: 'Units are included in column names. Pace and finish times remain numeric seconds for analysis.',
+      location_data: 'Route coordinates are intentionally excluded.',
+      raw_samples: 'Raw heart-rate, pace, cadence, and elevation arrays are excluded; useful summaries are exported instead.',
+      comment_and_tags: 'comment and tags are the notes and tags typed on each activity in the app. notes_status is "included" on every row of a complete export; "unavailable" means the notes store could not be read, so a blank comment does not mean there was no note: export again.',
+    },
+    caveats: {
+      daily_plan_completion: 'planned_day_completed only means at least one activity occurred on a planned date; it does not prove the prescribed workout was followed.',
+      hr_zones: 'Athlete HR zone columns are Garmin zone floors: a zone runs from its own lower bound up to one below the next zone\'s, and zone 5 up to max_hr_bpm.',
+      sessions: 'A session the watch saved as several back-to-back runs (warm-up, test, cool-down) is one Activities row: activity_id is its main run, merged_activity_ids the others. The row reads as the main run (the race or the test itself): its distance, time, pace, heart rate, running dynamics, type, execution and weather. session_distance_km and session_duration_seconds add the runs saved apart, filled on merged rows only; zones, TRIMP, calories and elevation count the whole session. Runs synced before start times were stored stay one row each.',
+      load_source: 'trimp comes from heart rate, or is "estimated from effort" (session RPE × minutes, scaled to TRIMP) where the heart rate is not trusted: recorded before athlete hr_reliable_from, on the wrist sensor after it, or marked unreliable in the app. Such a run\'s heart-rate and zone columns are blank.',
+      type: 'type is Garmin\'s label from training effect, or Runomics\' from the workout name when type_source is runomics; it often differs from the intent. description and planned_type say what the session was meant to be.',
+      planned_columns: 'planned_* are the Runomics coach\'s prescription for that day when there is one (purpose, pace guide, heart-rate cap), else the workout on the Garmin calendar. They sit on the day\'s main session; compare them with the execution_* columns.',
+      race_results: 'race_official_* are published results (chip time, certified distance). distance_km and pace_sec_per_km stay what the watch measured, which runs long on GPS.',
+    },
+    sheets: {
+      Athlete: 'Current athlete profile and physiological reference values.',
+      Context: 'What the numbers cannot say: the training goal, available days, the current block and the focus of each week, upcoming races, injury history, and the reasons behind breaks in training.',
+      Activities: 'One row per session with conditions, intensity, what was planned and how it was executed, official race results, records, gear, and your notes and tags. The CSV export is this sheet alone.',
+      Intervals: 'One row per segment of a workout with reps or strides - warm-up, each rep or stride, each recovery, cool-down - with its own pace and heart rate.',
+      'Daily Status': 'One row per calendar day, including rest days, with load, status, plan, and any training break.',
+      Records: 'Official yearly personal bests plus locally derived records when no official record exists.',
+      Races: 'Completed races with their official result next to the watch\'s, and calendar races. predicted_time_seconds is Garmin\'s prediction on the race day.',
+      'Training Plan': 'Workouts on the Garmin calendar, with the coach\'s purpose and heart-rate cap where the Runomics coach prescribed them.',
+      'Fitness History': 'VO2max, lactate-threshold, threshold-pace, fitness-age, and weight history.',
+      'Race Predictions': 'Garmin race prediction history in seconds.',
+      Shoes: 'Shoe lifecycle and distance accumulated in exported activities.',
+      Goals: 'Annual volume and race-time targets with observed progress.',
+      'Load Balance': 'Latest Garmin four-week intensity balance and personalised target ranges.',
+    },
+    context: {
+      weekdays: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+      on: (name: string, date: string) => `${name} on ${date}`,
+      span: (start: string, end: string) => `${start} to ${end}`,
+      week: (index: number, span: string) => `Week ${index}, ${span}`,
+      target: (time: string) => `target ${time}`,
+      noTarget: 'no target time set',
+      noInjury: 'No running injury reported.',
+      resolved: 'resolved',
+      ongoing: 'ongoing',
+      resolutionUnknown: 'not known to be resolved',
+      weeksOut: (weeks: number) => `${weeks} week${weeks === 1 ? '' : 's'} out`,
+      recurrent: 'recurrent',
+    },
   },
 
   activityTypes: {

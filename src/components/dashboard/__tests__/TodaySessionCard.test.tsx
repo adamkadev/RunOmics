@@ -12,7 +12,7 @@ const STRIDES = [
     { kind: 'recovery' as const, minutes: 1, seconds: 60, rep: i + 1 },
   ]).flat(),
 ]
-const EASY: HeroWorkoutView = { title: 'Easy run', type: 'Base', duration: { seconds: 3_600, estimated: false }, distanceM: 10_000, activityId: null, target: null, structure: null, hr: null }
+const EASY: HeroWorkoutView = { key: 'garmin:2026-10-20:Easy run', title: 'Easy run', type: 'Base', duration: { seconds: 3_600, estimated: false }, distanceM: 10_000, activityId: null, target: null, structure: null, hr: null }
 
 function card(overrides: Partial<SessionCard> = {}): SessionCard {
   return { date: '2026-10-20', eyebrow: 'Tomorrow · Tue 20', title: 'Easy run', km: '10', detail: '1:00 h · ≤ 158 bpm', workout: EASY, phase: 'Base', href: '/plan?date=2026-10-20', ...overrides }

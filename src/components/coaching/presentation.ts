@@ -1,5 +1,4 @@
 import { DAY_MS, isoDate, startOfWeek } from '@/lib/calendarDate'
-import type { PrescriptionView } from '@/application/coaching/GetCoachingView'
 import type { PlanPhaseRange } from '@/application/usecases/GetTrainingPlan'
 import type { WorkoutStep, WorkoutStepKind } from '@/domain/activity/types'
 import {
@@ -10,10 +9,10 @@ import {
   type WorkoutTarget,
 } from '@/domain/coaching/types'
 import { macrocyclePhases } from '@/domain/coaching/macrocycle'
+import { prescriptionMeters } from '@/domain/coaching/sessionDistance'
 import { bookends } from '@/domain/training/workoutStructure'
 import type { SessionHrTarget } from '@/domain/training/hrTarget'
 import { formatClock } from '@/lib/formatters'
-import { t } from '@/i18n'
 
 function utc(date: string): number {
   return Date.parse(date + 'T00:00:00Z')
@@ -57,10 +56,6 @@ export function preparationWeek(plan: MacrocycleSpan, date: string): number | nu
   return week >= 1 ? week : null
 }
 
-export function garminAlert(view: Pick<PrescriptionView, 'garminStatus'>): string | null {
-  return view.garminStatus === 'scheduled_different' ? t.coaching.garminOutOfDate : null
-}
-
 // Reuses the map that sends every easy-effort type (easy, recovery, long_run) to 'Base', so a literal list cannot drift from it.
 export function isKeyPrescription(workout: Pick<WorkoutPrescription, 'type'>): boolean {
   return COACHING_TO_ACTIVITY_TYPE[workout.type] !== 'Base'
@@ -91,15 +86,6 @@ function eachSegment(
     }
   }
   return true
-}
-
-/** A repetition prescribed as time still covers ground: converted through its own prescribed pace, as weekKm does. */
-function segmentMeters(target: WorkoutTarget): number {
-  if (target.distanceMeters !== undefined) return target.distanceMeters
-  if (target.durationSeconds && target.paceSecPerKm) {
-    return (target.durationSeconds * 2_000) / (target.paceSecPerKm.min + target.paceSecPerKm.max)
-  }
-  return 0
 }
 
 const STEP_KIND: Record<WorkoutSegmentKind, WorkoutStepKind> = {
@@ -172,11 +158,7 @@ export function prescriptionDuration(
 }
 
 export function prescriptionDistanceMeters(workout: Segmented & Pick<WorkoutPrescription, 'totalDistanceMeters'>): number | null {
-  if (workout.totalDistanceMeters !== undefined) return workout.totalDistanceMeters
-
-  let meters = 0
-  eachSegment(workout, (target) => { meters += segmentMeters(target) })
-  return Math.round(meters) || null
+  return prescriptionMeters(workout)
 }
 
 export function prescriptionStructure(workout: Segmented & Pick<WorkoutPrescription, 'totalDurationSeconds'>): WorkoutStep[] | null {

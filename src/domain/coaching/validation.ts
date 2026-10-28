@@ -8,6 +8,7 @@ import {
   type CoachingEventRole,
   type CoachingPlan,
   type CoachingProvenance,
+  type BlockGuideProposal,
   type NumberRange,
   type TargetEvent,
   type TrainingGoal,
@@ -127,6 +128,7 @@ function provenance(value: unknown, path: string): CoachingProvenance {
     ...(raw.promptVersion === undefined ? {} : { promptVersion: string(raw.promptVersion, `${path}.promptVersion`) }),
     ...(raw.decisionId === undefined ? {} : { decisionId: string(raw.decisionId, `${path}.decisionId`) }),
     ...(raw.parentRevision === undefined ? {} : { parentRevision: integer(raw.parentRevision, `${path}.parentRevision`, 1) }),
+    ...(raw.guidanceHash === undefined ? {} : { guidanceHash: string(raw.guidanceHash, `${path}.guidanceHash`) }),
   }
 }
 
@@ -255,6 +257,19 @@ function targetEvent(value: unknown, path: string): TargetEvent {
   }
 }
 
+function guideProposal(value: unknown, path: string): BlockGuideProposal {
+  const raw = object(value, path)
+  if (typeof raw.adopted !== 'boolean') throw new CoachingValidationError(`${path}.adopted`, 'expected a boolean')
+  return {
+    repClass: enumeration(raw.repClass, ['long', 'medium', 'short'], `${path}.repClass`),
+    source: enumeration(raw.source, ['sessions', 'fitness_check'], `${path}.source`),
+    guide: range(raw.guide, `${path}.guide`),
+    proposedGuide: range(raw.proposedGuide, `${path}.proposedGuide`),
+    dates: array(raw.dates, `${path}.dates`, isoDate),
+    adopted: raw.adopted,
+  }
+}
+
 export function parseCoachingPlan(value: unknown, path = 'plan'): CoachingPlan {
   const raw = object(value, path)
   schemaVersion(raw.schemaVersion, `${path}.schemaVersion`)
@@ -270,6 +285,9 @@ export function parseCoachingPlan(value: unknown, path = 'plan'): CoachingPlan {
       startDate: isoDate(blockRaw.startDate, `${path}.block.startDate`),
       endDate: isoDate(blockRaw.endDate, `${path}.block.endDate`),
       focus: string(blockRaw.focus, `${path}.block.focus`),
+      ...(blockRaw.guideProposals === undefined
+        ? {}
+        : { guideProposals: array(blockRaw.guideProposals, `${path}.block.guideProposals`, guideProposal) }),
     },
     ...(raw.trainingPreferences === undefined ? {} : { trainingPreferences: trainingPreferences(raw.trainingPreferences) }),
     ...(raw.macrocycleStartDate === undefined

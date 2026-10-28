@@ -13,6 +13,7 @@ import type { WearStatus } from '@/domain/shoe/wearStatus'
 import type { ProgressHubView } from './progressHubView'
 import { shortDist } from '@/components/goals/shortDistance'
 import { WEAR_COLOR } from '@/components/shoes/shoeWear'
+import { CoachBlockName } from './CoachBlockName'
 
 const TITLE = 'text-headline text-foreground'
 const LINK_CARD = 'text-left transition-transform duration-100 ease-out active:scale-[0.98]'
@@ -93,6 +94,32 @@ function RaceCard({ race }: { race: ProgressHubView['race'] }) {
   )
 }
 
+function BlockCard({ block }: { block: NonNullable<ProgressHubView['block']> }) {
+  const h = t.profile.hub
+  return (
+    <Link href="/plan" className={cardClass({ className: cn('flex flex-col gap-2.5 px-4 py-3.5', LINK_CARD) })} data-testid="block-tile">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-[3px]">
+          <span className={cn(EYEBROW_CLASS, 'text-accent-text')}>{h.currentBlock}</span>
+          <p className="break-words text-[15px] font-semibold text-foreground text-pretty" data-testid="block-name"><CoachBlockName fallback={block.name} general={block.general} /></p>
+        </div>
+        <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" data-testid="block-week">
+          {h.blockWeek(block.week, block.total)}
+          <ChevronRight size={14} aria-hidden="true" />
+        </span>
+      </div>
+      <div aria-hidden className="flex gap-[3px]">
+        {Array.from({ length: block.total }, (_, i) => (
+          <span key={i} className={cn('h-[5px] flex-1 rounded-full', i < block.week ? 'bg-accent' : 'bg-[var(--line-2)]')} />
+        ))}
+      </div>
+      {block.planned > 0 && (
+        <span className="text-xs text-muted-foreground" data-testid="block-sessions">{h.blockSessions(block.done, block.planned)}</span>
+      )}
+    </Link>
+  )
+}
+
 function YearCard({ view }: { view: ProgressHubView }) {
   const h = t.profile.hub
   const { hero } = view
@@ -100,9 +127,9 @@ function YearCard({ view }: { view: ProgressHubView }) {
   const shortKm = projection && hero.goalKm !== null ? projection.yearKm - hero.goalKm : null
   const share = (km: number) => (hero.goalKm ? Math.min(1, Math.max(0, km / hero.goalKm)) * 100 : 0)
   return (
-    <Link href="/goals" className={cardClass({ className: cn('flex flex-col gap-[9px] px-4 py-3.5', LINK_CARD) })} data-testid="year-hero">
+    <Link href={hero.goalKm !== null ? '/goals' : '/all-time'} className={cardClass({ className: cn('flex flex-col gap-[9px] px-4 py-3.5', LINK_CARD) })} data-testid="year-hero">
       <div className="flex items-center justify-between gap-2">
-        <span className={TITLE}>{h.goalsSeason}</span>
+        <span className={TITLE}>{hero.goalKm !== null ? h.goalsSeason : h.thisYear}</span>
         <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted-foreground" />
       </div>
       <div className="flex items-baseline justify-between gap-3">
@@ -204,7 +231,7 @@ export function ProgressHub({ view, explored, checkpoint }: { view: ProgressHubV
         </Link>
       </header>
 
-      <RaceCard race={view.race} />
+      {!view.race && view.block ? <BlockCard block={view.block} /> : <RaceCard race={view.race} />}
       <YearCard view={view} />
       {checkpoint}
 
@@ -244,6 +271,10 @@ export function ProgressHub({ view, explored, checkpoint }: { view: ProgressHubV
 
       <Records records={view.records} vo2max={vo2max} />
 
+      <Tile href="/athlete" title={h.athleteZones} testId="athlete-row">
+        <span className="text-[13px] text-muted-foreground">{h.athleteZonesDetail}</span>
+      </Tile>
+
       {shoes.length > 0 && (
         <section className={cardClass({ className: 'flex flex-col gap-3' })} data-testid="shoes-tile">
           <div className="flex items-center justify-between gap-2">
@@ -272,33 +303,36 @@ export function ProgressHub({ view, explored, checkpoint }: { view: ProgressHubV
         </section>
       )}
 
-      <Link href="/all-time" aria-label={h.openYears} className={cardClass({ className: cn('flex flex-col gap-3.5', LINK_CARD) })} data-testid="all-time">
-        <div className="flex items-baseline justify-between gap-2">
-          <span className={TITLE}>{h.allTime}</span>
-          {allTime.since && <Caption>{h.since(formatDate(allTime.since, { precision: 'month', year: 'always' }))}</Caption>}
+      <section className={cardClass({ className: cn('relative', LINK_CARD) })} data-testid="all-time-card">
+        <Link href="/all-time" aria-label={h.openYears} className="absolute inset-0 rounded-[24px]" data-testid="all-time" />
+        <div className="pointer-events-none relative flex flex-col gap-3.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className={TITLE}>{h.allTime}</span>
+            {allTime.since && <Caption>{h.since(formatDate(allTime.since, { precision: 'month', year: 'always' }))}</Caption>}
+          </div>
+          <StatGrid columns={3}>
+            <Stat label={h.distance} value={formatKm(allTime.km)} unit={t.units.km} valueStyle={{ fontSize: 24 }} />
+            <Stat label={h.runsLabel} value={allTime.runs} valueStyle={{ fontSize: 24 }} />
+            <Stat label={h.time} value={formatKm(allTime.hours)} unit={h.hours} valueStyle={{ fontSize: 24 }} />
+          </StatGrid>
+          <ul className="flex flex-col gap-3 border-t border-border pt-3 text-[13px]" data-testid="year-rows">
+            {[...allTime.years.slice(-2)].reverse().map((y) => {
+              const current = y.year === view.year
+              return (
+                <li key={y.year} className="grid grid-cols-[44px_minmax(0,1fr)_150px] items-center gap-3" data-testid="year-row">
+                  <span className={cn(current ? 'font-semibold text-foreground' : 'text-muted-foreground')}>{y.year}</span>
+                  <span aria-hidden className="block h-1.5 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                    <span className="block h-full rounded-full" data-testid="year-bar" style={{ width: `${(y.km / bestYearKm) * 100}%`, background: current ? 'var(--accent)' : 'var(--series-2)' }} />
+                  </span>
+                  <span className="text-right text-muted-foreground">
+                    <b className="font-semibold text-foreground">{formatKm(y.km)} {t.units.km}</b> · {t.common.runs(y.runs)}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
         </div>
-        <StatGrid columns={3}>
-          <Stat label={h.distance} value={formatKm(allTime.km)} unit={t.units.km} valueStyle={{ fontSize: 24 }} />
-          <Stat label={h.runsLabel} value={allTime.runs} valueStyle={{ fontSize: 24 }} />
-          <Stat label={h.time} value={formatKm(allTime.hours)} unit={h.hours} valueStyle={{ fontSize: 24 }} />
-        </StatGrid>
-        <ul className="flex flex-col gap-3 border-t border-border pt-3 text-[13px]" data-testid="year-rows">
-          {[...allTime.years.slice(-2)].reverse().map((y) => {
-            const current = y.year === view.year
-            return (
-              <li key={y.year} className="grid grid-cols-[44px_minmax(0,1fr)_150px] items-center gap-3" data-testid="year-row">
-                <span className={cn(current ? 'font-semibold text-foreground' : 'text-muted-foreground')}>{y.year}</span>
-                <span aria-hidden className="block h-1.5 overflow-hidden rounded-full bg-[var(--surface-2)]">
-                  <span className="block h-full rounded-full" data-testid="year-bar" style={{ width: `${(y.km / bestYearKm) * 100}%`, background: current ? 'var(--accent)' : 'var(--series-2)' }} />
-                </span>
-                <span className="text-right text-muted-foreground">
-                  <b className="font-semibold text-foreground">{formatKm(y.km)} {t.units.km}</b> · {t.common.runs(y.runs)}
-                </span>
-              </li>
-            )
-          })}
-        </ul>
-      </Link>
+      </section>
     </div>
   )
 }

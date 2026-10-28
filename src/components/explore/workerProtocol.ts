@@ -1,4 +1,6 @@
+import type { AvoidCircle } from '@/domain/explore/avoidSpots'
 import type { RoutePlan } from '@/domain/explore/routePlan'
+import type { RouteContext } from '@/domain/explore/routeScore'
 import type {
   AreaCoverage,
   ExploreAreaFile,
@@ -18,14 +20,6 @@ export type LonLat = [number, number]
 /** The version is part of it, so a rebuilt area never mixes with results computed on the old one. */
 export function areaKey(ref: Pick<ExploreAreaRef, 'id' | 'version'>): string {
   return `${ref.id}:${ref.version}`
-}
-
-/** `/api/map/routes` keys its tracks by route index, which shifts with every new run; the activity id never does. */
-export interface ClusterTrackRef {
-  routeIdx: number
-  id: string
-  /** 'YYYY-MM-DD', or an ISO timestamp (only its first 10 characters are kept). */
-  date: string
 }
 
 /** Two flat buffers, so the tracks cross to the worker by transfer instead of as 200 000 small arrays to clone. */
@@ -54,11 +48,13 @@ export interface ScoreRoutesRequest {
   candidates: RouteCandidate[]
   targetM: number
   prefs: RoutePreferences
+  context?: RouteContext
 }
 
 /** No home: the start is worked out from the area file alone. */
 export interface RouteStartRequest {
   unitId: string
+  avoid?: AvoidCircle[]
 }
 
 /** Home comes in as for coverage: the plan picks no via near it. */
@@ -69,12 +65,12 @@ export interface RoutePlanRequest {
   homeFromTracks?: boolean
   distanceM: number
   seeds: number[]
+  avoid?: AvoidCircle[]
 }
 
 export type ExploreRequestBody =
   | { type: 'loadArea'; ref: ExploreAreaRef }
   | ({ type: 'addTracks'; areaKey: string } & TrackBuffers)
-  | { type: 'fetchClusterTracks'; areaKey: string; clusterId: string; index: ClusterTrackRef[] }
   | ({ type: 'coverage'; areaKey: string } & CoverageOptions)
   | ({ type: 'scoreRoutes'; areaKey: string } & ScoreRoutesRequest)
   | ({ type: 'routeStart'; areaKey: string } & RouteStartRequest)
@@ -95,7 +91,6 @@ export interface ExploreResults {
   /** The main thread needs the shapes for MapLibre. */
   loadArea: ExploreAreaFile
   addTracks: AddedTracks
-  fetchClusterTracks: AddedTracks
   coverage: AreaCoverage
   /** Best first. */
   scoreRoutes: ScoredRoute[]

@@ -1,4 +1,5 @@
 import type { User } from 'firebase/auth'
+import type { AvoidCircle } from '@/domain/explore/avoidSpots'
 import type { RouteCandidate } from '@/domain/explore/types'
 import { authorizedFetch } from '@/lib/ownerFetch'
 import { reportClientError } from '@/lib/reportClientError'
@@ -12,9 +13,9 @@ export interface RouteBatchRequest {
   start: [number, number]
   distanceM: number
   seeds: number[]
-  avoidBusyRoads: boolean
   /** One list per seed: the way through the quartier from a start outside it. */
   vias?: [number, number][][]
+  avoid?: AvoidCircle[]
 }
 
 export interface RouteBatch {

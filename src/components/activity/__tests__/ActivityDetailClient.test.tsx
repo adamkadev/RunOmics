@@ -88,7 +88,7 @@ describe('ActivityDetailClient', () => {
     renderDetail()
     const stats = screen.getByTestId('run-stats')
     expect(stats.textContent).toBe(
-      `${formatDistance(6.11)}${t.units.km}${t.activity.stats.distance}25:24${t.activity.stats.duration}4:10${t.units.perKm}${t.activity.stats.pace}115${t.units.bpm}${t.activity.stats.avgHr}`,
+      `${formatDistance(6.11)}${t.units.km}${t.activity.stats.distance}25:24${t.units.min}${t.activity.stats.duration}4:10${t.units.perKm}${t.activity.stats.pace}115${t.units.bpm}${t.activity.stats.avgHr}`,
     )
     expect(stats.className).toContain('grid-cols-[repeat(4,minmax(0,1fr))]')
     expect(stats.className).toContain('gap-x-2')
@@ -96,8 +96,14 @@ describe('ActivityDetailClient', () => {
     expect(screen.getAllByText(t.activity.stats.distance)).toHaveLength(1)
   })
 
-  // "Time" has no unit: a cell sized by its content would lift its label above the others.
-  it('puts every value in one fixed row and every label in the next, unit or not', () => {
+  it('reads a run of an hour or more to the minute, as the share card does', () => {
+    renderDetail({ activity: { ...ACTIVITY, durationSeconds: 5_270 } })
+    const time = screen.getByTestId('run-stats').querySelectorAll<HTMLElement>('[data-stat-value]')[1]!
+
+    expect(time.textContent).toBe(`1:28${t.units.hour}`)
+  })
+
+  it('puts every value in one fixed row and every label in the next', () => {
     renderDetail()
     const stats = screen.getByTestId('run-stats')
     expect(stats.className).toContain('grid-rows-[44px_auto]')
@@ -114,14 +120,13 @@ describe('ActivityDetailClient', () => {
       expect(value.className).toContain('text-[length:min(28px,')
       expect(value.nextElementSibling?.hasAttribute('data-stat-label')).toBe(true)
     }
-    expect(values[1]!.children).toHaveLength(0)
     expect(values[0]!.querySelector('span')!.className).toContain('leading-none')
     expect(labels[0]!.className).toContain('text-[15px]')
   })
 
   it('reads Effort, conditions, shoe and note as chips in the verdict card', () => {
     const weather = { tempC: 18, apparentTempC: 18, humidityPct: 60, windKph: 2, windDirDeg: 0, precipitationMm: 0, code: 0 }
-    renderDetail({ activity: { ...ACTIVITY, rpe: 1, weather } as ActivityDetailView, shoe: { name: 'Vomero Plus', dotColor: '#fff' } })
+    renderDetail({ activity: { ...ACTIVITY, rpe: 1, weather } as ActivityDetailView, shoe: { gearId: 'v1', name: 'Vomero Plus', dotColor: '#fff' } })
     const chips = within(screen.getByTestId('run-chips'))
     expect(chips.getByTestId('run-effort').textContent).toBe(t.activities.row.rpeValue(1))
     expect(chips.getAllByTestId('run-conditions').map((chip) => chip.textContent)).toEqual(['Clear sky · 18°C', 'wind 2 km/h N'])
@@ -148,7 +153,7 @@ describe('ActivityDetailClient', () => {
   })
 
   it('reads the pair without a link on a run the watch never gave an id', () => {
-    renderDetail({ shoe: { name: 'Vomero Plus', dotColor: '#fff' } })
+    renderDetail({ shoe: { gearId: 'v1', name: 'Vomero Plus', dotColor: '#fff' } })
     const chip = screen.getByTestId('run-shoe')
     expect(chip.textContent).toBe('Vomero Plus')
     expect(chip.getAttribute('href')).toBeNull()
@@ -171,6 +176,27 @@ describe('ActivityDetailClient', () => {
     act(() => screen.getByRole('tab', { name: t.activity.tabs.charts }).click())
     expect(window.location.search).toBe('?tab=charts')
     expect(screen.getByRole('tab', { name: t.activity.tabs.charts })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it("ends every tab's panel with the footer, so a short tab's height falls below it", () => {
+    renderDetail({ footer: <nav data-testid="footer" /> })
+    for (const name of [t.activity.tabs.overview, t.activity.tabs.charts]) {
+      act(() => screen.getByRole('tab', { name }).click())
+      expect(screen.getByTestId('activity-panel').lastElementChild).toBe(screen.getByTestId('footer'))
+    }
+  })
+
+  it('opens the Overview with the best efforts when the run holds a ranked one, and ends it with them otherwise', () => {
+    const activity = { ...ACTIVITY, bestEfforts: { '5k': 1_200 } } as ActivityDetailView
+    const extras = <div data-testid="extras" />
+    const before = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+
+    const { unmount } = renderDetail({ activity, extras, qualifiedEfforts: [{ key: '5k', label: '5K', rank: 2 }] })
+    expect(before(screen.getByTestId('best-efforts'), screen.getByTestId('extras'))).toBe(true)
+    unmount()
+
+    renderDetail({ activity, extras, qualifiedEfforts: [] })
+    expect(before(screen.getByTestId('extras'), screen.getByTestId('best-efforts'))).toBe(true)
   })
 
   it('opens on the tab the URL names', () => {

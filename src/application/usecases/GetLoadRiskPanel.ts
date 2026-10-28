@@ -1,10 +1,11 @@
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { getAthleteProfile } from '@/infrastructure/repositories/JsonAthleteRepository'
 import { latestLoadPair, loadRatio } from '@/domain/training/loadTrend'
-import { getLoadPairs } from './GetLoadRecovery'
+import { getLoadSeries } from './GetLoadRecovery'
 import { buildTimeSeries, dailyTrimpByDate, type HrBounds } from './GetTrainingLoad'
+import { hrBoundsOf } from '@/domain/training/trimp'
 import { acwr } from './GetTrainingStatus'
-import { DAY_MS, addDays, isoDate } from '@/lib/calendarDate'
+import { appTodayIso, DAY_MS, addDays, isoDate } from '@/lib/calendarDate'
 import { round } from '@/lib/math'
 
 export type RiskZone = 'low' | 'safe' | 'caution' | 'risk'
@@ -93,7 +94,7 @@ export async function getLoadRiskPanel(): Promise<LoadRiskPanel | null> {
   const athlete = getAthleteProfile()
   const hrBounds: HrBounds | undefined =
     athlete.maxHrBpm && athlete.restingHrBpm
-      ? { maxHr: athlete.maxHrBpm, restingHr: athlete.restingHrBpm }
+      ? hrBoundsOf(athlete)
       : undefined
 
   const refDate = new Date(latest.date + 'T00:00:00')
@@ -102,12 +103,14 @@ export async function getLoadRiskPanel(): Promise<LoadRiskPanel | null> {
 
   // From the pair Load trend plots: Garmin's own acwr field disagrees with its
   // loads (0.8 beside 412 and 295).
-  const pair = latestLoadPair(getLoadPairs())
+  const loads = getLoadSeries()
+  const pair = latestLoadPair(loads.pairs)
   const pairAcwr = pair ? loadRatio(pair) : null
-  const localAcwr = acwr(activities, refDate)
+  // Today, not the last run: anchored on the run, a week off still reads as a full acute week.
+  const localAcwr = acwr(activities, new Date(appTodayIso() + 'T00:00:00'))
   const acwrValue = pairAcwr ?? localAcwr
   const acwrZoneValue = acwrZone(acwrValue)
-  const acwrSource = acwrValue === null ? null : pairAcwr !== null ? 'garmin' : 'local'
+  const acwrSource = acwrValue === null ? null : pairAcwr !== null ? loads.source : 'local'
 
   let monotonyValue: number | null = null
   let strainValue: number | null = null

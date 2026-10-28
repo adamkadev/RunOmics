@@ -1,15 +1,16 @@
 import { getTrainingStatusDays } from '@/infrastructure/repositories/JsonTrainingStatusRepository'
 import { getRecoveryDays } from '@/infrastructure/repositories/JsonRecoveryRepository'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
-import { loadPairs, type LoadPair } from '@/domain/training/loadTrend'
+import { loadPairs, localLoadPairs, type LoadPair } from '@/domain/training/loadTrend'
+import { ownLoadDays } from './GetTrainingLoad'
 import { restingDays, type RecoveryDay } from '@/domain/training/recovery'
 
-/**
- * The acute/chronic series (v5.4): the one Load trend plots, the Load ratio
- * divides and the coach read reads. Every caller goes through here.
- */
-export function getLoadPairs(): LoadPair[] {
-  return loadPairs(getTrainingStatusDays())
+export type LoadSource = 'garmin' | 'local'
+
+/** Garmin's pairs, or the app's own where the watch sends none (a Forerunner 55). */
+export function getLoadSeries(): { pairs: LoadPair[]; source: LoadSource } {
+  const garmin = loadPairs(getTrainingStatusDays())
+  return garmin.length ? { pairs: garmin, source: 'garmin' } : { pairs: localLoadPairs(ownLoadDays(getAllActivities())), source: 'local' }
 }
 
 /**

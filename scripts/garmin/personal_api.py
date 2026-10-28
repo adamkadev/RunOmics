@@ -16,9 +16,9 @@ host and stay on Connect's private API (client.py). Where both serve the same
 data the method names match GarminClient's, so sync.py reads activities from
 either.
 
-Unlike garth's OAuth1 token, which nothing can replace since Garmin changed
-its login in March 2026, the key is official: when it expires - a year at
-most - the athlete creates another in Garmin Connect.
+Unlike Connect's token, which only a scripted sign-in that Garmin keeps
+changing can mint, the key is official: when it expires - a year at most -
+the athlete creates another in Garmin Connect.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import httpx
 
 from .errors import GarminAPIError, GarminAuthError
 from .retry import retry_transient
-from .shared import collect_activity_starts, fit_from_archive, zone_floors
+from .shared import collect_activity_rows, fit_from_archive, zone_floors
 
 DEFAULT_BASE_URL = "https://personal.connectapi.garmin.com"
 TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
@@ -42,13 +42,12 @@ _LIST_PATH = "/activitylist-service/activities/search/activities"
 _TIMEOUT = httpx.Timeout(120.0, connect=30.0)
 
 # What each refusal of the key most likely means. A 403 is also how Garmin
-# answers an address it blocks, and a valid key shown once is not one to
-# throw away over a dropped tunnel.
+# answers an address it blocks, and a valid key shown once is not one to throw away over it.
 _KEY_REFUSED = {
     400: "the key is malformed - check the secret holds the whole of it",
     401: f"it has expired or was revoked - create a new one at {KEY_PAGE}",
     403: f"either it was revoked (create a new one at {KEY_PAGE}) or Garmin blocks the address the "
-    "request came from (is WARP connected?)",
+    "request came from",
 }
 
 
@@ -79,7 +78,7 @@ class PersonalApiClient:
         if not token:
             raise GarminAuthError(
                 f"Garmin answered the key exchange with no token (HTTP {resp.status_code}): something "
-                "between the sync and Garmin - a proxy, a captive page - answered instead (is WARP connected?)."
+                "between the sync and Garmin - a proxy, a captive page - answered instead."
             )
         return token
 
@@ -115,8 +114,8 @@ class PersonalApiClient:
         self._rows.update((str(row["activityId"]), row) for row in rows)
         return rows
 
-    def get_activity_starts(self, *, running_only: bool = True) -> dict[str, str | None]:
-        return collect_activity_starts(self.get_activities, running_only=running_only)
+    def get_activity_rows(self, *, running_only: bool = True) -> dict[str, dict[str, Any]]:
+        return collect_activity_rows(self.get_activities, running_only=running_only)
 
     def get_activity_detail(self, activity_id: str) -> dict[str, Any]:
         # An empty answer raises rather than passing for an activity: mapped,

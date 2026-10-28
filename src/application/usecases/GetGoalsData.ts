@@ -5,7 +5,7 @@ import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepo
 import { getUpcomingRaceYears } from '@/infrastructure/repositories/JsonUpcomingRaceRepository'
 import { getGoalYears } from '@/infrastructure/repositories/JsonGoalRepository'
 import { getPbYears } from '@/infrastructure/repositories/JsonPbRepository'
-import { getGarminRacePredictions } from './GetGarminRacePredictions'
+import { freshGarminPredictions, getGarminRacePredictions } from './GetGarminRacePredictions'
 import { DISTANCE_KEY, getRecords } from './GetRecords'
 import { RACE_DISTANCES, type RaceDistanceKey } from '@/domain/race/distances'
 import { DAY_MS, addDays, appTodayIso, isoDate, startOfWeek } from '@/lib/calendarDate'
@@ -89,6 +89,16 @@ export interface GoalsPageData {
   history: YearOutcome[]
   /** The next race in any year; each year's own spotlight only sees that year's races. */
   nextRace: NextRaceSpotlight | null
+  missingGoalYear: number | null
+}
+
+/** The year whose goal is still to set: next year from 1 December, else this one; none for an athlete who set none last year. */
+export function missingGoalYear(goalYears: readonly number[], today: string): number | null {
+  const year = Number(today.slice(0, 4))
+  if (goalYears.length === 0 || Math.max(...goalYears) < year - 1) return null
+  if (!goalYears.includes(year)) return year
+  if (today.slice(5) >= '12-01' && !goalYears.includes(year + 1)) return year + 1
+  return null
 }
 
 export function computeProjection(
@@ -289,18 +299,18 @@ export async function getCurrentWeeklyGoal(today: string = appTodayIso()): Promi
   return computeWeeklyGoal(getAllActivities(), year, goals, now)
 }
 
-async function getGoalPredictions(): Promise<GoalRacePrediction[]> {
-  const garmin = getGarminRacePredictions()
-  if (!garmin) return []
+async function getGoalPredictions(today: string): Promise<GoalRacePrediction[]> {
+  const latest = freshGarminPredictions(getGarminRacePredictions(), today)
+  if (Object.keys(latest).length === 0) return []
 
   const records = await getRecords()
   const recordByKey = new Map(records.map((r) => [r.key, r]))
 
-  return RACE_DISTANCES.filter((key) => garmin.latest[key] != null).map((key) => {
+  return RACE_DISTANCES.filter((key) => latest[key] != null).map((key) => {
     const record = recordByKey.get(key)
     return {
       key,
-      predictedSeconds: garmin.latest[key]!,
+      predictedSeconds: latest[key]!,
       actualSeconds: record?.seconds ?? null,
       actualDate: record?.date ?? null,
     }
@@ -312,7 +322,7 @@ export async function getGoalsPageData(today: string = appTodayIso()): Promise<G
   const upcomingRaceYears = getUpcomingRaceYears()
   const goalYears = getGoalYears()
   const pbYears = getPbYears()
-  const predictions = await getGoalPredictions()
+  const predictions = await getGoalPredictions(today)
   const plannedByMonth = plannedKmByMonth(await getPlannedWorkouts())
 
   const activityMap = new Map(activities.map((a) => [a.id, a]))
@@ -382,5 +392,5 @@ export async function getGoalsPageData(today: string = appTodayIso()): Promise<G
 
   const nextRace = nextRaceAcrossYears(upcomingRaceYears, currentYear, predictions, today)
 
-  return { years: allYears, byYear, history, nextRace }
+  return { years: allYears, byYear, history, nextRace, missingGoalYear: missingGoalYear(goalYears.map((g) => g.year), today) }
 }

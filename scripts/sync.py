@@ -19,22 +19,28 @@ sys.path.insert(0, str(Path(__file__).parent))
 from garmin.athlete import fetch_athlete_metrics, fetch_personal_athlete_metrics, record_athlete_history, vo2max_metrics
 from data_directory import get_data_dir, get_fit_cache_dir
 from garmin.client import GarminClient
+from garmin.connect_status import record_connect_status
 from garmin.cross_training import sync_cross_training
-from garmin.errors import GarminAPIError, GarminAuthError
+from garmin.errors import GarminAPIError, GarminAuthError, GarminTokenExpired
 from garmin.personal_api import KEY_PAGE, PersonalApiClient
 from garmin.fitness_age_history import sync_fitness_age_history
+from garmin.listing_reconcile import Removal, refresh_names, remove_missing_runs
 from garmin.retry import retry_transient
 from garmin.race_predictions import sync_race_predictions
 from garmin.recovery_history import sync_recovery_history
+from garmin.series_freshness import series_freshness
+from garmin import step_warnings
 from garmin.training_plan import sync_training_plan
 from garmin.threshold_history import sync_threshold_history
 from garmin.training_status import sync_load_balance, sync_training_status
 from garmin.vo2max_history import newest_carried_vo2max, sync_vo2max_from_runs, sync_vo2max_history
 from garmin.vo2max_norms import fetch_vo2max_norms, write_vo2max_norms
-from sync_workouts import enrich_description_from_plan, fetch_planned_workouts, write_planned_workouts
+from sync_workouts import enrich_description_from_plan, fetch_planned_workouts, planned_description, write_planned_workouts
 from sync_upcoming_races import fetch_upcoming_races, write_upcoming_races
 from processing.fit_parser import ParsedFit, parse_fit
 from processing.mapper import extract_gear_id, local_start_time, map_activity, parse_hr_zones
+from processing.activity_type import TypeContext, infer_type_with_source
+from processing.type_context import load_type_context
 from processing.weather import WeatherClient, weather_for_activity
 from repository.json_store import JsonActivityStore, PlannedWorkoutStore
 from repository.history_file import HistoryFileError, read_history, write_history
@@ -58,9 +64,10 @@ ActivitySource = PersonalApiClient | GarminClient
 
 def main() -> int:
     args = _parse_args()
+    step_warnings.reset()
 
     # The Personal API key reads the activities, resting HR and the athlete's
-    # zones. GARMIN_SECRET (garth) adds what only Connect's private API
+    # zones. GARMIN_SECRET (garminconnect) adds what only Connect's private API
     # serves - gear, the calendar, training status, race predictions - and,
     # alone, reads everything as it did before the key existed.
     api_key = os.environ.get("GARMIN_PERSONAL_API_KEY", "").strip()
@@ -86,6 +93,7 @@ def main() -> int:
     existing_ids = store.get_existing_ids()
     print(f"activities.json: {store.count()} existing activities")
     weather_client = WeatherClient()
+    type_context = load_type_context(_DATA_DIR)
     failed_steps: list[str] = []
 
     with ExitStack() as stack:
@@ -98,10 +106,10 @@ def main() -> int:
             if api_key
             else None
         )
-        connect = (
-            _open_client(stack, "Garmin Connect", lambda: GarminClient(secret), failed_steps, fallback=personal is not None)
+        connect, connect_expired = (
+            _open_connect(stack, secret, failed_steps, fallback=personal is not None, dry_run=args.dry_run)
             if secret and not quick
-            else None
+            else (None, False)
         )
         # Never None: _open_client raises when there is no fallback.
         client: ActivitySource = personal or connect
@@ -121,16 +129,24 @@ def main() -> int:
         else:
             source = "the Personal API" if personal else "Garmin Connect"
             print(f"Fetching activity list from {source}…")
-            starts = client.get_activity_starts(running_only=not args.all_types)
-            all_ids = list(starts)
+            rows = client.get_activity_rows(running_only=not args.all_types)
+            all_ids = list(rows)
             if not args.dry_run:
                 timed = sum(
                     store.set_start_time(aid, start)
-                    for aid, raw in starts.items()
-                    if (start := local_start_time(raw))
+                    for aid, row in rows.items()
+                    if (start := local_start_time(row.get("startTimeLocal")))
                 )
                 if timed:
                     print(f"Start time filled in on {timed} stored activit{'y' if timed == 1 else 'ies'}.")
+                renamed = refresh_names(
+                    store,
+                    rows,
+                    describe=lambda name, day: planned_description(name, day, planned_store),
+                    retype=lambda run: _retype(run, type_context),
+                )
+                if renamed:
+                    print(f"Name refreshed on {renamed} stored activit{'y' if renamed == 1 else 'ies'}.")
 
             if args.force:
                 new_ids = list(all_ids)
@@ -139,6 +155,7 @@ def main() -> int:
             if args.limit:
                 new_ids = new_ids[: args.limit]
 
+        removal = Removal()
         added = updated = failed = 0
         # Runs the key read whose gear Connect did not answer: stored with the
         # shoe on file, offered to the gear refresh below, and the night counts
@@ -173,7 +190,7 @@ def main() -> int:
 
                     activity_data = map_activity(
                         detail, parsed, hr_zones=hr_zones, file_name=file_name, gear=gear,
-                        weather=weather,
+                        weather=weather, type_context=type_context,
                     )
                     enrich_description_from_plan(activity_data, planned_store)
                 except Exception as exc:
@@ -195,7 +212,7 @@ def main() -> int:
                     activity_data,
                     replace=args.force,
                     keep_gear=gear is None,
-                    gear_pending=gear is None and bool(secret),
+                    gear_pending=gear is None and bool(secret) and not connect_expired,
                     keep_zone_bounds=client is personal,
                 )
                 if connect and gear is None:
@@ -210,6 +227,12 @@ def main() -> int:
         if gear_unanswered:
             failed_steps.append(f"gear of {len(gear_unanswered)} run(s)")
 
+        # Only a whole, unfiltered list says a run is gone; one cut by --limit or --id would read as deletions.
+        if not args.id and not args.limit and not args.dry_run:
+            removal = remove_missing_runs(client, store, rows)
+            if removal.problem:
+                failed_steps.append(removal.problem)
+
         regeared = 0
         if connect and not args.force and not args.id:
             regeared = _refresh_recent_gear(connect, store, skip=set(new_ids) - set(gear_unanswered))
@@ -222,10 +245,13 @@ def main() -> int:
             print(f"\nDry run: {added} would be added, {failed} would fail.")
 
         if not args.dry_run and not args.id:
-            failed_steps += _run_isolated(_post_save_steps(connect, personal, store))
+            failed_steps += _run_isolated(
+                _post_save_steps(connect, personal, store, cross_since=removal.retyped_since())
+            )
 
         if not args.dry_run:
-            _write_sync_meta()
+            # A quick or single-run sync reads none of Connect's series: the last full night's warnings stand.
+            _write_sync_meta(None if quick or args.id else step_warnings.collected())
 
     if failed_steps:
         print(f"\n{len(failed_steps)} step(s) failed: {', '.join(failed_steps)}.")
@@ -233,8 +259,7 @@ def main() -> int:
 
 
 # What a sign-in that failed raises: a refused credential, Garmin or the
-# network down, a secret that does not parse (garth's requests errors are
-# OSErrors). Anything else is a bug, and stops the night like one.
+# network down, a secret that does not parse (a ValueError). Anything else is a bug, and stops the night like one.
 _SIGN_IN_ERRORS = (GarminAuthError, GarminAPIError, httpx.HTTPError, OSError, ValueError)
 _Client = TypeVar("_Client", PersonalApiClient, GarminClient)
 
@@ -246,12 +271,34 @@ def _open_client(
     and the other client can read the runs instead."""
     try:
         return stack.enter_context(open_client())
+    except GarminTokenExpired:
+        raise
     except _SIGN_IN_ERRORS as exc:
         if not fallback:
             raise
         print(f"Warning: {name} sign-in failed ({type(exc).__name__}: {exc}); carrying on without it.")
         failed_steps.append(f"{name} sign-in")
         return None
+
+
+def _open_connect(
+    stack: ExitStack, secret: str, failed_steps: list[str], *, fallback: bool, dry_run: bool
+) -> tuple[GarminClient | None, bool]:
+    """Connect's client, and whether its token has expired: then Connect is absent, not failing, so not partial."""
+    try:
+        connect = _open_client(stack, "Garmin Connect", lambda: GarminClient(secret), failed_steps, fallback=fallback)
+    except GarminTokenExpired as exc:
+        if not dry_run:
+            record_connect_status(expired=True)
+        if not fallback:
+            raise
+        print(f"Garmin Connect is gone: {exc}\nCarrying on without it; see 'Connect token expiry' in docs/data-and-sync.md.")
+        return None, True
+    if connect and (notice := connect.credential_notice()):
+        print(f"Warning: {notice}")
+    if connect and not dry_run:
+        record_connect_status(expired=False)
+    return connect, False
 
 
 def _fetch_gear(connect: GarminClient, activity_id: str, *, required: bool) -> list[dict] | None:
@@ -314,7 +361,11 @@ def _run_isolated(steps: list[Step]) -> list[str]:
 
 
 def _post_save_steps(
-    connect: GarminClient | None, personal: PersonalApiClient | None, store: JsonActivityStore
+    connect: GarminClient | None,
+    personal: PersonalApiClient | None,
+    store: JsonActivityStore,
+    *,
+    cross_since: date | None = None,
 ) -> list[Step]:
     """The steps after the activities, each from the API that serves it.
 
@@ -324,7 +375,9 @@ def _post_save_steps(
     own FIT readings carry on.
     """
     recovery_source: ActivitySource = personal or connect
-    cross: list[Step] = [("cross-training", lambda: sync_cross_training(recovery_source, store.get_existing_ids()))]
+    cross: list[Step] = [
+        ("cross-training", lambda: sync_cross_training(recovery_source, store.get_existing_ids(), since=cross_since))
+    ]
     athlete: list[Step] = [("athlete metrics", lambda: _sync_athlete_metrics(connect, personal))]
     recovery: list[Step] = [("recovery history", lambda: sync_recovery_history(recovery_source))]
     if connect is None:
@@ -355,6 +408,24 @@ def _post_save_steps(
         ("load balance", lambda: sync_load_balance(client)),
         ("training plan", lambda: sync_training_plan(client)),
     ]
+
+
+def _retype(run: dict, type_context: TypeContext) -> dict | None:
+    """Without its cached FIT a run keeps its type: inferring from the summary alone would drop Garmin's race flag."""
+    fit_path = _FIT_DIR / f"{run['id']}.fit"
+    parsed = parse_fit(fit_path.read_bytes()) if fit_path.exists() else None
+    if not parsed or not parsed.has_data:
+        return None
+    inference = infer_type_with_source(
+        run.get("description", ""),
+        parsed,
+        activity_id=run.get("id"),
+        hr_zones=run.get("hrZones") or [],
+        duration_seconds=run.get("durationSeconds"),
+        date=run.get("date"),
+        context=type_context,
+    )
+    return {"type": inference.activity_type, "typeSource": inference.source}
 
 
 def _sync_planned_workouts(client: GarminClient, planned_store: PlannedWorkoutStore) -> None:
@@ -397,8 +468,22 @@ def _first_activity_date(store: JsonActivityStore) -> date | None:
     return date.fromisoformat(min(dates)) if dates else None
 
 
-def _write_sync_meta() -> None:
-    write_history(_SYNC_META_PATH, {"lastSyncedAt": datetime.now(timezone.utc).isoformat()})
+def _write_sync_meta(warnings: list[dict[str, str]] | None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    previous = _read_sync_meta()
+    kept = ("shoesCheckedAt", "warnings", "warningsAt") if warnings is None else ("shoesCheckedAt",)
+    meta: dict = {"lastSyncedAt": now, **{key: previous[key] for key in kept if key in previous}}
+    if warnings is not None:
+        meta.update({"warnings": warnings, "warningsAt": now})
+    meta["seriesFreshness"] = series_freshness(_DATA_DIR)
+    write_history(_SYNC_META_PATH, meta)
+
+
+def _read_sync_meta() -> dict:
+    try:
+        return read_history(_SYNC_META_PATH)
+    except HistoryFileError:
+        return {}
 
 
 def _merge_athlete_metrics(metrics: dict) -> None:

@@ -3,8 +3,20 @@
 import { useCallback, useEffect, useId, useRef, useState, type Ref } from 'react'
 import { ArrowDownToLine, Check, ChevronRight, Minus, Plus, Share2, X } from 'lucide-react'
 import { t } from '@/i18n'
+import { AVOID_LIMITS, AVOID_RADII_M, AVOID_REASONS, type AvoidReason } from '@/domain/explore/avoidSpots'
+import { climbBudget, type ClimbBudget, type SessionDay } from '@/domain/explore/climbBudget'
+import type { Darkness } from '@/domain/explore/daylight'
 import type { RoutePreferences } from '@/domain/explore/types'
-import { formatClock, formatDecimal, formatDistance, formatDurationWords, formatNumber, formatPercent } from '@/lib/formatters'
+import {
+  formatClock,
+  formatDate,
+  formatDecimal,
+  formatDistance,
+  formatDurationWords,
+  formatNumber,
+  formatPercent,
+  formatTimeOfDay,
+} from '@/lib/formatters'
 import { saveFileWithFallback } from '@/lib/fileExport'
 import { useDragToDismiss } from '@/lib/useDragToDismiss'
 import { cn } from '@/lib/utils'
@@ -14,9 +26,9 @@ import { SEGMENTED_FILL_SEGMENT_CLASS, SEGMENTED_IDLE_CLASS, SEGMENTED_THUMB_CLA
 import { SHEET_CONTROL } from '@/components/ui/Sheet'
 import { Toggle } from '@/components/ui/Toggle'
 import { ROUTE_KM_MAX } from './exploreHref'
-import type { RouteFailure } from './routeApi'
 import { canStepDown, canStepUp, stepRouteKm, type RouteStats } from './routeGenerator'
 import { ROUTE_START_MODES, type RouteStartMode } from './routeStart'
+import type { AvoidSpots } from './useAvoidSpots'
 import type { GeneratorFailure } from './useRouteGenerator'
 
 /** For the camera to measure, as the quartier sheet's. */
@@ -25,13 +37,15 @@ export const ROUTE_PANEL_TEST_ID = 'route-generator'
 export type RouteGeneratorStatus = 'generating' | 'ready' | 'error'
 
 /** Failures a second try can fix; the others need a change (distance) or can't be fixed here. */
-const RETRYABLE: ReadonlySet<GeneratorFailure> = new Set<RouteFailure>(['rateLimited', 'providerLimit', 'upstream', 'invalid'])
+const RETRYABLE: ReadonlySet<GeneratorFailure> = new Set<GeneratorFailure>(['rateLimited', 'providerLimit', 'upstream', 'invalid', 'tracks'])
 
 export function failureMessage(failure: GeneratorFailure): string {
   const errors = t.pages.map.explore.errors
   switch (failure) {
     case 'tooFar':
       return errors.tooFarToRun
+    case 'tracks':
+      return errors.tracks
     case 'notConfigured':
       return errors.notConfigured
     case 'auth':
@@ -47,6 +61,39 @@ export function failureMessage(failure: GeneratorFailure): string {
     case 'upstream':
       return errors.upstream
   }
+}
+
+/** Under a tenth of the loop on trails is a footpath through a park, not a trail run. */
+const NOTABLE_TRAIL_PCT = 10
+/** About two minutes of walking at 10 % or more: enough to break an easy run's heart rate. */
+const STEEP_HINT_M = 200
+
+export function climbLine(budget: ClimbBudget, stats: Pick<RouteStats, 'climbPerKm'> | null): string {
+  const c = t.pages.map.explore.climb
+  const session = c.sessions[budget.kind]
+  const perKm = stats?.climbPerKm != null ? formatNumber(stats.climbPerKm, 0) : null
+  if (budget.maxMPerKm === null) return perKm === null ? c.flat(session) : c.flatLoop(session, perKm)
+  const max = formatNumber(budget.maxMPerKm, 0)
+  if (perKm === null) return c.upTo(session, max)
+  return stats!.climbPerKm! > budget.maxMPerKm ? c.over(session, perKm, max) : c.within(session, perKm, max)
+}
+
+export function darknessLine(darkness: Darkness): string | null {
+  const d = t.pages.map.explore.dark
+  if (!darkness) return null
+  if (darkness.kind === 'night') return d.night
+  return darkness.kind === 'dusk' ? d.dusk(formatTimeOfDay(darkness.at)) : d.dawn(formatTimeOfDay(darkness.at))
+}
+
+export function terrainLine(budget: ClimbBudget, stats: Pick<RouteStats, 'trailPct' | 'steepClimbM'> | null): string | null {
+  const e = t.pages.map.explore
+  if (!stats) return null
+  const easyDay = budget.kind !== 'quality' && budget.kind !== 'beforeQuality'
+  const parts = [
+    ...(stats.trailPct >= NOTABLE_TRAIL_PCT ? [e.trailShare(formatPercent(stats.trailPct))] : []),
+    ...(easyDay && stats.steepClimbM >= STEEP_HINT_M ? [e.steepHint] : []),
+  ]
+  return parts.length > 0 ? parts.join(' · ') : null
 }
 
 const km = (value: number) => `${formatDistance(value)} ${t.units.km}`
@@ -69,6 +116,9 @@ export interface RouteGeneratorPanelProps {
   plan: { heading: string; label: string; km: number | null } | null
   start: { mode: RouteStartMode; waiting: boolean }
   onStartModeChange: (mode: RouteStartMode) => void
+  day: SessionDay
+  darkness: Darkness
+  avoid: AvoidSpots
   prefs: RoutePreferences
   onPrefsChange: (prefs: RoutePreferences) => void
   status: RouteGeneratorStatus
@@ -95,6 +145,9 @@ export function RouteGeneratorPanel({
   plan,
   start,
   onStartModeChange,
+  day,
+  darkness,
+  avoid,
   prefs,
   onPrefsChange,
   status,
@@ -127,6 +180,19 @@ export function RouteGeneratorPanel({
     [ref],
   )
   const [optionsOpen, setOptionsOpen] = useState(false)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const markRef = useRef<HTMLButtonElement | null>(null)
+  const wasMarking = useRef(avoid.marking)
+  // Back from the marking bar, its row is scrolled to the top so the new spot's row, and its reason, are in view.
+  useEffect(() => {
+    const back = wasMarking.current && !avoid.marking
+    wasMarking.current = avoid.marking
+    const list = listRef.current
+    const mark = markRef.current
+    if (!back || !list || !mark) return
+    list.scrollTop += mark.getBoundingClientRect().top - list.getBoundingClientRect().top
+    mark.focus({ preventScroll: true })
+  }, [avoid.marking])
   // The file saved, and for which loop: a new loop is a new file to save.
   const [saved, setSaved] = useState<{ key: string; file: File; canShare: boolean } | null>(null)
   const isSaved = saved !== null && saved.key === routeKey
@@ -155,6 +221,10 @@ export function RouteGeneratorPanel({
     ...(prefs.newStreetsFirst ? [e.summary.newStreetsFirst] : []),
     ...(prefs.flatForReps ? [e.summary.flatForReps] : []),
   ].join(' · ')
+  const budget = climbBudget(day)
+  const notes = [climbLine(budget, ready ? stats : null), darknessLine(darkness), terrainLine(budget, ready ? stats : null)].filter(
+    (line): line is string => line !== null,
+  )
   const onPlan = plan?.km != null && plan.km === distanceKm
   const reachKm = failure === 'tooFar' && minKm != null && minKm <= ROUTE_KM_MAX ? minKm : null
   const errorText = reachKm != null ? e.errors.tooFar(stepperKm(reachKm)) : failure ? failureMessage(failure) : null
@@ -185,7 +255,8 @@ export function RouteGeneratorPanel({
       style={sheetStyle}
     >
       <GlassLayers />
-      <div className="flex min-h-0 flex-1 flex-col px-[var(--sheet-pad)] pb-[var(--sheet-pad)] pt-1.5">
+      {avoid.marking && <MarkingBar onCancel={() => avoid.setMarking(false)} />}
+      <div hidden={avoid.marking} className="flex min-h-0 flex-1 flex-col px-[var(--sheet-pad)] pb-[var(--sheet-pad)] pt-1.5">
         <div className="-mx-[var(--sheet-pad)] flex justify-center pb-2.5" {...handleProps}>
           <span aria-hidden="true" className="h-[5px] w-9 rounded-[2.5px] bg-[rgb(127_127_127/0.45)]" />
         </div>
@@ -200,7 +271,7 @@ export function RouteGeneratorPanel({
           <span aria-hidden="true" />
         </div>
 
-        <div className="-mx-[var(--sheet-pad)] mt-3.5 flex min-h-0 flex-col gap-3.5 overflow-y-auto px-[var(--sheet-pad)]" style={{ touchAction: 'pan-y' }}>
+        <div ref={listRef} className="-mx-[var(--sheet-pad)] mt-3.5 flex min-h-0 flex-col gap-3.5 overflow-y-auto px-[var(--sheet-pad)]" style={{ touchAction: 'pan-y' }}>
           {plan && (
             <button
               type="button"
@@ -306,6 +377,7 @@ export function RouteGeneratorPanel({
                   <span className="text-[15px] text-foreground">{e.flatForReps}</span>
                   <Toggle checked={prefs.flatForReps} onChange={(on) => onPrefsChange({ ...prefs, flatForReps: on })} label={e.flatForReps} />
                 </label>
+                {avoid.enabled && <AvoidSpotsRows avoid={avoid} markRef={markRef} />}
               </div>
             )}
           </div>
@@ -337,6 +409,16 @@ export function RouteGeneratorPanel({
                 </div>
               ))}
             </dl>
+          )}
+
+          {notes.length > 0 && (
+            <div data-testid="route-notes" className="-mt-1 flex flex-col gap-0.5 text-[13px] leading-[18px] text-muted-foreground">
+              {notes.map((line) => (
+                <p key={line} className="text-pretty">
+                  {line}
+                </p>
+              ))}
+            </div>
           )}
 
           {/* 1 : 1.4 shares of the room their labels leave, so a long French label takes what it needs first. */}
@@ -398,5 +480,119 @@ export function RouteGeneratorPanel({
         </div>
       </div>
     </div>
+  )
+}
+
+/** Concentric with the sheet's corner, which a 74 pt bar rounds to 37 (12 + 25). */
+function MarkingBar({ onCancel }: { onCancel: () => void }) {
+  const a = t.pages.map.explore.avoid
+  const promptId = useId()
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  // The button that opened the bar is hidden with the panel's rows.
+  useEffect(() => {
+    cancelRef.current?.focus({ preventScroll: true })
+  }, [])
+  return (
+    <div data-testid="route-avoid-marking" className="flex min-h-[74px] items-center gap-3 py-3 pl-[var(--sheet-pad)] pr-3">
+      <p id={promptId} className="min-w-0 flex-1 text-[15px] leading-5 text-foreground text-pretty max-[359px]:text-[14px]">
+        {a.markPrompt}
+      </p>
+      <Button
+        ref={cancelRef}
+        size="lg"
+        variant="secondary"
+        onClick={onCancel}
+        aria-describedby={promptId}
+        className="shrink-0 bg-[var(--sheet-fill)] px-5 shadow-[var(--sheet-fill-rim)]"
+      >
+        {a.cancel}
+      </Button>
+    </div>
+  )
+}
+
+function AvoidSpotsRows({ avoid, markRef }: { avoid: AvoidSpots; markRef: Ref<HTMLButtonElement> }) {
+  const a = t.pages.map.explore.avoid
+  const fullId = useId()
+  const day = (iso: string) => formatDate(iso, { style: 'bare', year: 'never' })
+  return (
+    <>
+      <div aria-hidden="true" className="ml-4 h-px bg-[var(--row-separator)]" />
+      <div className="flex min-h-[50px] items-center justify-between gap-3 pl-4 pr-2.5">
+        <span className="text-[15px] text-foreground">{a.title}</span>
+        <Button
+          ref={markRef}
+          size="sm"
+          variant="secondary"
+          onClick={() => avoid.setMarking(true)}
+          disabled={avoid.full}
+          aria-describedby={avoid.full ? fullId : undefined}
+          data-testid="route-avoid-mark"
+        >
+          {a.mark}
+        </Button>
+      </div>
+      {avoid.full && (
+        <p id={fullId} data-testid="route-avoid-full" className="px-4 pb-2.5 text-[13px] leading-[18px] text-muted-foreground">
+          {a.full(AVOID_LIMITS.stored)}
+        </p>
+      )}
+      {avoid.spots.map((spot) => {
+        const selected = avoid.selectedId === spot.id
+        return (
+          <div key={spot.id} data-testid="route-avoid-spot" data-selected={selected || undefined} className="flex flex-col">
+            <div className="flex min-h-[44px] items-center gap-2 pl-4 pr-1.5">
+              <button
+                type="button"
+                onClick={() => avoid.locate(spot.id)}
+                aria-label={a.locate(day(spot.createdAt))}
+                className="min-h-[44px] min-w-0 flex-1 truncate text-left text-[13px] text-muted-foreground"
+              >
+                {spot.expiresOn ? a.markedUntil(day(spot.createdAt), day(spot.expiresOn)) : a.marked(day(spot.createdAt))}
+              </button>
+              <select
+                aria-label={a.reason}
+                value={spot.reason ?? ''}
+                onChange={(event) => avoid.setReason(spot.id, (event.target.value || null) as AvoidReason | null)}
+                className="h-8 rounded-lg bg-transparent text-[13px] text-foreground"
+              >
+                <option value="">{a.reasons.none}</option>
+                {AVOID_REASONS.map((reason) => (
+                  <option key={reason} value={reason}>
+                    {a.reasons[reason]}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={() => avoid.remove(spot.id)} aria-label={a.remove} className="hit-44 flex size-8 items-center justify-center text-muted-foreground">
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+            {selected && (
+              <div role="group" aria-label={a.radius} data-testid="route-avoid-radius" className="flex items-center gap-2 pb-2.5 pl-4 pr-2.5">
+                {AVOID_RADII_M.map((radiusM) => (
+                  <button
+                    key={radiusM}
+                    type="button"
+                    aria-pressed={spot.radiusM === radiusM}
+                    onClick={() => avoid.setRadius(spot.id, radiusM)}
+                    className={cn(
+                      'hit-44 h-8 rounded-full px-3 text-[13px] font-medium tabular-nums',
+                      spot.radiusM === radiusM ? 'bg-accent text-accent-foreground' : 'bg-[var(--sheet-fill)] text-foreground shadow-[var(--sheet-fill-rim)]',
+                    )}
+                  >
+                    {a.radiusM(formatNumber(radiusM, 0))}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {avoid.failed && (
+        <p role="alert" className="px-4 pb-2.5 text-[13px] leading-[18px] text-foreground">
+          {a.failed}
+        </p>
+      )}
+    </>
   )
 }

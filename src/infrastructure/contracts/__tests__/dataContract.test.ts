@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { checkDataDirectory } from '../dataContract'
-import { writeDemoDataset } from '../../../../scripts/generate_demo_data.mjs'
+import { generateDemoDataset, writeDemoDataset } from '../../../../scripts/generate_demo_data.mjs'
 
 let dir: string
 
@@ -24,7 +24,7 @@ function write(relative: string, value: unknown) {
 const activity = (overrides: Record<string, unknown> = {}) => ({
   id: '1', week: 202637, date: '2026-09-10', dayOfWeek: 'Thursday', type: 'Base', description: 'Easy',
   comment: '', durationSeconds: 1800, distanceKm: 5, paceSecPerKm: 360, hrZones: [], avgHeartRate: 140,
-  rpe: null, polyline: null, route: [[6.1, 49.6], [6.2, 49.7]], splits: null, bestEfforts: null, weather: null,
+  rpe: null, route: [[6.1, 49.6], [6.2, 49.7]], splits: null, bestEfforts: null, weather: null,
   ...overrides,
 })
 
@@ -40,6 +40,25 @@ describe('the data contract', () => {
   it('accepts the demo dataset the generator writes', () => {
     writeDemoDataset(dir)
     expect(checkDataDirectory(dir)).toEqual([])
+  })
+
+  it('accepts the sparse profile the generator writes', () => {
+    writeDemoDataset(dir, generateDemoDataset({ profile: 'sparse' }))
+    expect(checkDataDirectory(dir)).toEqual([])
+  })
+
+  it('only warns about a shoe pick or a sync report it cannot read, which never break a page', () => {
+    activities(activity())
+    write('shoe_choices.json', { runs: { 1: { gearId: '' } }, settings: [] })
+    write('sync_meta.json', { lastSyncedAt: '2026-10-27T03:00:00Z', warnings: 'none', seriesFreshness: [] })
+
+    expect(errors()).toEqual([])
+    expect(warnings().map((p) => `${p.file} ${p.path}`)).toEqual([
+      'shoe_choices.json $.runs.1.gearId',
+      'shoe_choices.json $.settings',
+      'sync_meta.json $.warnings',
+      'sync_meta.json $.seriesFreshness',
+    ])
   })
 
   it('accepts an empty workspace - a fresh deployment has no data yet', () => {
@@ -102,6 +121,42 @@ describe('the data contract', () => {
   it('refuses heart-rate zone bounds the zone tables cannot split', () => {
     write('athlete.json', { hrZoneBoundsBpm: [142, 158, 168, 177] })
     expect(errors()).toEqual([expect.objectContaining({ file: 'athlete.json', path: '$.hrZoneBoundsBpm' })])
+  })
+
+  it('accepts every break reason the coach reads, and only warns on another', () => {
+    const pause = (reason: string) => ({ start: '2026-02-02', end: '2026-03-15', reason })
+    write('athlete.json', { trainingBreaks: ['injury', 'illness', 'pregnancy', 'heat', 'travel', 'personal'].map(pause) })
+    expect(checkDataDirectory(dir)).toEqual([])
+
+    write('athlete.json', { trainingBreaks: [pause('pregancy')] })
+    expect(errors()).toEqual([])
+    expect(warnings()).toEqual([expect.objectContaining({ file: 'athlete.json', path: '$.trainingBreaks[0].reason' })])
+  })
+
+  it('refuses an hrReliableFrom that is not a date, since it decides which heart rate is trusted', () => {
+    write('athlete.json', { hrReliableFrom: '2026-10-16' })
+    expect(checkDataDirectory(dir)).toEqual([])
+
+    write('athlete.json', { hrReliableFrom: '16/10/2026' })
+    expect(errors()).toEqual([expect.objectContaining({ file: 'athlete.json', path: '$.hrReliableFrom' })])
+  })
+
+  it('refuses a maxWeeklyKm that is not a positive number, since it caps every block', () => {
+    write('athlete.json', { maxWeeklyKm: 70 })
+    expect(checkDataDirectory(dir)).toEqual([])
+
+    write('athlete.json', { maxWeeklyKm: '70' })
+    expect(errors()).toEqual([expect.objectContaining({ file: 'athlete.json', path: '$.maxWeeklyKm' })])
+  })
+
+  it('accepts the heart-rate source and continuous-run fields, and only warns on unknown values', () => {
+    activities(
+      activity({ hrSource: 'external', longestContinuousRunSec: 900, longestContinuousRunM: 2010.5 }),
+      activity({ id: '2', hrSource: null, longestContinuousRunSec: null }),
+      activity({ id: '3', hrSource: 'chest', longestContinuousRunSec: '900' }),
+    )
+    expect(errors()).toEqual([])
+    expect(warnings().map((p) => p.path)).toEqual(['$.activities[2].longestContinuousRunSec', '$.activities[2].hrSource'])
   })
 
   it('refuses a cross-training session the lists cannot key or place, and only warns on its figures', () => {

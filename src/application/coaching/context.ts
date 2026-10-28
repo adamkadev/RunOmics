@@ -4,6 +4,8 @@ import { trainingHistory, isRunningActivity, type TrainingHistory } from '@/doma
 import { createHash } from 'crypto'
 import { autoregulationReport, controlledStep, type AutoregulationReport } from './autoregulation'
 import { controlledThresholdFacts, type ControlledThresholdFacts } from './controlledThreshold'
+import { blockTargets } from './blockTargets'
+import { volumeBand } from './volume'
 import type { Activity } from '@/domain/activity/types'
 import { sessionExecution, type SessionExecution } from '@/domain/activity/sessionExecution'
 import { raceExecution, type RaceExecution } from '@/domain/activity/raceExecution'
@@ -17,6 +19,8 @@ import {
 } from '@/domain/activity/raceResult'
 import { COACHING_TO_ACTIVITY_TYPE, type CoachingPlan } from '@/domain/coaching/types'
 import { raceDistanceMeters } from '@/domain/coaching/raceTarget'
+import { sessionForRun, sessionsAcrossPlans, type RunSession } from '@/domain/coaching/sessionForRun'
+import { intendedType } from '@/lib/activityTitle'
 import type { AthleteProfile, InjuryHistory, TrainingBreak } from '@/infrastructure/repositories/JsonAthleteRepository'
 import { niggleEpisodes, shiftDate, type CheckIn, type NiggleEpisode } from '@/domain/wellness/checkIn'
 import type { Trajectories } from '@/domain/training/trajectories'
@@ -26,6 +30,7 @@ import type { LoadBalanceData } from '@/application/usecases/GetLoadBalance'
 import type { TrainingZonesData } from '@/application/usecases/GetTrainingZones'
 import type { GarminRacePredictionsData } from '@/application/usecases/GetGarminRacePredictions'
 import { otherTrainingFacts, type CrossTrainingSession, type OtherTrainingFacts } from '@/domain/activity/crossTraining'
+import { returnToRunning, type ReturnToRunning } from './returnToRunning'
 
 const RECENT_DAYS = 28
 const NIGGLE_DAYS = 84
@@ -36,6 +41,8 @@ export interface CompactActivity {
   id: string
   date: string
   type: Activity['type']
+  /** The type of the session the run was set as, where it differs from the type the watch or RunOmics filed. */
+  intendedType?: Activity['type']
   distanceKm: number
   durationSeconds: number
   paceSecPerKm: number | null
@@ -96,7 +103,11 @@ export interface CoachingContext {
     injuryHistory: InjuryHistory | null
     /** Typed into athlete.json; absent when it has none. */
     trainingBreaks?: TrainingBreak[]
+    /** The weekly volume growth stops at, typed into athlete.json; absent means none. */
+    maxWeeklyKm?: number
   }
+  /** Absent unless a long injury, illness or pregnancy break has not yet been followed by 30 minutes of running. */
+  returnToRunning?: ReturnToRunning
   /** The morning check-ins; absent when they could not be read, which is not the same as none written. */
   wellness?: {
     checkIns: ({ date: string } & CheckIn)[]
@@ -191,12 +202,16 @@ function adherence(plan: CoachingPlan | null, activities: Activity[], referenceD
       return age >= 0 && age < RECENT_DAYS
     })
   if (prescribed.length === 0) return null
-  const completed = prescribed.filter((workout) =>
-    activities.some((activity) =>
-      activity.date.slice(0, 10) === workout.date && activity.type === COACHING_TO_ACTIVITY_TYPE[workout.type]
-    )
-  ).length
+  const sessions = prescribed.map((prescription) => ({ prescription, activityId: null }))
+  const done = new Set(activities.map((activity) => sessionForRun(activity, sessions)?.id))
+  const completed = prescribed.filter((workout) => done.has(workout.id)).length
   return { prescribed: prescribed.length, completed, percent: Math.round((completed / prescribed.length) * 100) }
+}
+
+function intent(activity: Activity, sessions: readonly RunSession[]): Partial<CompactActivity> {
+  const session = sessionForRun(activity, sessions)
+  const intended = session ? COACHING_TO_ACTIVITY_TYPE[session.type] : intendedType(activity)
+  return intended === activity.type ? {} : { intendedType: intended }
 }
 
 /** Omitted rather than emitted empty: a `note: ""` on every run is prompt noise. */
@@ -246,6 +261,24 @@ export function buildCoachingContext(input: CoachingContextInput, referenceDate:
   const officialResults = officialResultsByActivityId(input.officialResults)
   const history = trainingHistory(input.activities, referenceDate)
   const otherTraining = otherTrainingFacts(input.crossTraining ?? [], referenceDate)
+  const sessions = input.plan ? sessionsAcrossPlans([input.plan, ...(input.archivedPlans ?? [])], []) : []
+  const breaks = recentBreaks(input.athlete.trainingBreaks, referenceDate)
+  const returning = returnToRunning(breaks.trainingBreaks, input.activities.filter(isRunningActivity), referenceDate)
+  const wellness = wellnessFacts(input.wellness, referenceDate)
+  const autoregulation = input.plan?.weeks.some((week) => week.workouts.some((workout) => controlledStep(workout) !== null))
+    ? autoregulationReport(input.activities, [input.plan, ...(input.archivedPlans ?? [])], referenceDate, input.officialResults)
+    : undefined
+  const block = returning ? undefined : blockTargets({
+    plan: input.plan,
+    runs: input.activities.filter(isRunningActivity),
+    referenceDate,
+    ...(wellness.wellness ? { checkIns: wellness.wellness.checkIns, niggles: wellness.wellness.niggles } : {}),
+    ...(input.athlete.trainingBreaks ? { breaks: input.athlete.trainingBreaks } : {}),
+    fatigue: autoregulation?.fatigue ?? null,
+    best4WeekAverageKm: history.best4WeekAverageKm,
+    band: volumeBand(history, input.athlete.maxWeeklyKm),
+    ...(input.athlete.maxWeeklyKm ? { maxWeeklyKm: input.athlete.maxWeeklyKm } : {}),
+  })
 
   return {
     schemaVersion: 1,
@@ -255,6 +288,7 @@ export function buildCoachingContext(input: CoachingContextInput, referenceDate:
       id: activity.id,
       date: activity.date.slice(0, 10),
       type: activity.type,
+      ...intent(activity, sessions),
       distanceKm: rounded(activity.distanceKm),
       durationSeconds: activity.durationSeconds,
       paceSecPerKm: activity.paceSecPerKm === null ? null : Math.round(activity.paceSecPerKm),
@@ -303,9 +337,11 @@ export function buildCoachingContext(input: CoachingContextInput, referenceDate:
       trainingZones: input.trainingZones,
       // Null means nobody has asked, which is not the same as none.
       injuryHistory: input.athlete.injuryHistory ?? null,
-      ...recentBreaks(input.athlete.trainingBreaks, referenceDate),
+      ...breaks,
+      ...(input.athlete.maxWeeklyKm ? { maxWeeklyKm: input.athlete.maxWeeklyKm } : {}),
     },
-    ...wellnessFacts(input.wellness, referenceDate),
+    ...(returning ? { returnToRunning: returning } : {}),
+    ...wellness,
     trajectories: input.trajectories,
     goals: input.goals,
     personalBests: input.personalBests,
@@ -323,10 +359,9 @@ export function buildCoachingContext(input: CoachingContextInput, referenceDate:
       input.athlete.lthrBpm,
       input.trainingZones?.thresholdPaceSecPerKm ?? input.athlete.thresholdPaceSecPerKm,
       history.best4WeekAverageKm,
+      block,
     ),
-    ...(input.plan?.weeks.some((week) => week.workouts.some((workout) => controlledStep(workout) !== null))
-      ? { autoregulation: autoregulationReport(input.activities, [input.plan, ...(input.archivedPlans ?? [])], referenceDate, input.officialResults) }
-      : {}),
+    ...(autoregulation ? { autoregulation } : {}),
   }
 }
 

@@ -2,7 +2,7 @@ import { getUpcomingRaceYears } from '@/infrastructure/repositories/JsonUpcoming
 import { getGoalYears } from '@/infrastructure/repositories/JsonGoalRepository'
 import { getAllActivities } from '@/infrastructure/repositories/JsonActivityRepository'
 import { getOfficialRaceResults } from '@/infrastructure/repositories/JsonRaceResultRepository'
-import { getGarminRacePredictions, type GarminRacePredictionsData } from './GetGarminRacePredictions'
+import { freshGarminPredictions, getGarminRacePredictions } from './GetGarminRacePredictions'
 import { DISTANCE_KEY, getRecords } from './GetRecords'
 import { RACE_DISTANCE_KM, isRaceDistanceKey, type RaceDistanceKey } from '@/domain/race/distances'
 import type { PredictionPoint } from '@/domain/race/pacing'
@@ -10,10 +10,11 @@ import type { GoalYear, UpcomingRace } from '@/domain/goals/types'
 import { officialResultsByActivityId } from '@/domain/activity/raceResult'
 import { bestRecentEffort, secondsForVdot } from '@/domain/training/vdot'
 import { DAY_MS, appTodayIso } from '@/lib/calendarDate'
+import { forecastForm, type FormForecast } from '@/domain/training/formForecast'
+import { athleteHrBounds, dailyTrimpByDate } from './GetTrainingLoad'
+import { getPlannedWorkouts } from './GetPlannedWorkouts'
 
 export const RACE_TREND_DAYS = 84
-/** Garmin's series is daily while garth reads it; a fortnight without a day means it has stopped. */
-export const STALE_PREDICTION_DAYS = 14
 const ESTIMATE_STEP_DAYS = 7
 
 /** What the estimate stands on when Garmin's predictions are missing or stale. */
@@ -35,6 +36,7 @@ export interface RacePageData {
   trend: PredictionPoint[]
   /** Set when the prediction and its trend are a VDOT estimate from the athlete's own efforts, not Garmin's. */
   estimate: RaceEstimate | null
+  form: FormForecast
 }
 
 function distanceOf(race: UpcomingRace): RaceDistanceKey | null {
@@ -49,17 +51,12 @@ export function nextKnownRace(races: readonly UpcomingRace[], today: string): Up
 /** The race's own target first, else the season's for that distance. */
 export function raceTarget(race: UpcomingRace, goalYears: readonly GoalYear[]): number | null {
   if (race.targetSeconds) return race.targetSeconds
+  if (race.justFinish) return null
   const year = Number(race.date.slice(0, 4))
   return goalYears.find((g) => g.year === year)?.targets.find((t) => t.distance === race.distance)?.targetSeconds ?? null
 }
 
 const daysBefore = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) - days * DAY_MS).toISOString().slice(0, 10)
-
-/** Garmin's latest prediction for the distance, unless the series has gone quiet. */
-export function freshGarminPrediction(predictions: GarminRacePredictionsData | null, distance: RaceDistanceKey, today: string): number | null {
-  if (!predictions?.latestDate || predictions.latestDate < daysBefore(today, STALE_PREDICTION_DAYS)) return null
-  return predictions.latest[distance] ?? null
-}
 
 /** Each week's VDOT estimate as it stood that day, so the line moves only when a better effort was run or one aged out. */
 function estimatedTrend(distanceKm: number, today: string): { latest: number; estimate: RaceEstimate; trend: PredictionPoint[] } | null {
@@ -78,6 +75,12 @@ function estimatedTrend(distanceKm: number, today: string): { latest: number; es
   return { latest, estimate: { effort: now.effort, date: now.date, vdot: Math.round(now.vdot * 10) / 10 }, trend }
 }
 
+async function raceDayForm(raceDate: string, today: string): Promise<FormForecast> {
+  const activities = getAllActivities().filter((a) => a.date <= today)
+  const planned = (await getPlannedWorkouts()).map((w) => ({ date: w.date, load: w.estimatedLoad ?? 0 }))
+  return forecastForm({ dailyLoad: dailyTrimpByDate(activities, athleteHrBounds()), runDates: activities.map((a) => a.date), planned, today, raceDate })
+}
+
 export async function getRacePageData(today: string = appTodayIso()): Promise<RacePageData | null> {
   const race = nextKnownRace(getUpcomingRaceYears().flatMap((y) => y.races), today)
   const distance = race ? distanceOf(race) : null
@@ -85,7 +88,7 @@ export async function getRacePageData(today: string = appTodayIso()): Promise<Ra
 
   const predictions = getGarminRacePredictions()
   const record = (await getRecords()).find((r) => r.key === distance)
-  const garmin = freshGarminPrediction(predictions, distance, today)
+  const garmin = freshGarminPredictions(predictions, today)[distance] ?? null
   const from = daysBefore(today, RACE_TREND_DAYS)
   const estimated = garmin === null ? estimatedTrend(RACE_DISTANCE_KM[distance], today) : null
   const trend = estimated?.trend ?? (predictions?.points ?? []).flatMap((p) => {
@@ -106,5 +109,6 @@ export async function getRacePageData(today: string = appTodayIso()): Promise<Ra
     pb: best ? { seconds: best, date: record?.date ?? null } : null,
     trend,
     estimate: estimated?.estimate ?? null,
+    form: await raceDayForm(race.date, today),
   }
 }

@@ -3,8 +3,7 @@ import type { ActivitySummary, PlannedWorkout } from '@/domain/activity/types'
 import type { CrossTrainingEntry } from '@/domain/activity/crossTraining'
 import { qualityKind } from '@/domain/training/qualitySession'
 import type { RecoveryDay } from '@/domain/training/recovery'
-import { weekTarget } from '@/domain/training/weekTarget'
-import { planMaps, resolvePlannedType, weekDates, weekPlanDays } from '@/components/plan/weekPlanDays'
+import { planMaps, planWeekTarget, resolvePlannedType, weekDates, weekPlanDays } from '@/components/plan/weekPlanDays'
 import { addDays, isoDate, startOfWeek } from '@/lib/calendarDate'
 import { formatDelta, formatDurationWords, formatPlannedKm, formatRanKm } from '@/lib/formatters'
 import { t } from '@/i18n'
@@ -31,7 +30,6 @@ export interface DigestInput {
 const RESTING_HR_BASELINE_DAYS = 28
 const MIN_WEEK_READINGS = 3
 const MIN_BASELINE_READINGS = 7
-const MAX_FOCUS_CHARS = 60
 
 const mean = (values: number[]) => values.reduce((sum, v) => sum + v, 0) / values.length
 
@@ -42,7 +40,7 @@ export function weeklyDigest({ today, activities, planned, coaching, recovery, c
   const nextMonday = isoDate(addDays(monday, 7))
   const maps = planMaps(activities, planned, coaching?.workouts ?? [])
   const days = weekPlanDays(weekDates(monday), maps)
-  const target = weekTarget(days, today, null)
+  const target = planWeekTarget(weekDates(monday), maps, today, null)
 
   const week = recovery.filter((d) => d.date >= lastMonday && d.date < nextMonday).map((d) => d.restingHr)
   const baseline = recovery
@@ -67,10 +65,6 @@ export function weeklyDigest({ today, activities, planned, coaching, recovery, c
   }
 }
 
-function shorten(text: string): string {
-  return text.length <= MAX_FOCUS_CHARS ? text : `${text.slice(0, MAX_FOCUS_CHARS - 1).trimEnd()}…`
-}
-
 /** Null for a week with nothing to say: no run, no other training, no plan, no resting HR, no focus. */
 export function digestPush(digest: WeeklyDigest): { title: string; body: string } | null {
   const n = t.notifications.weeklyDigest
@@ -83,10 +77,10 @@ export function digestPush(digest: WeeklyDigest): { title: string; body: string 
       : digest.qualityDone > 0 ? n.quality(digest.qualityDone) : null,
     digest.otherTrainingSeconds > 0 ? n.otherTraining(formatDurationWords(digest.otherTrainingSeconds)) : null,
   ]
-  const outlook = [
-    digest.restingHr ? n.restingHr(digest.restingHr.bpm, formatDelta(digest.restingHr.change)) : null,
-    digest.focus ? n.focus(shorten(digest.focus)) : null,
-  ]
+  const restingHr = digest.restingHr ? n.restingHr(digest.restingHr.bpm, formatDelta(digest.restingHr.change)) : null
   const line = (parts: (string | null)[]) => parts.filter(Boolean).join(' · ')
-  return { title: n.title, body: [line(volume), line(outlook)].filter(Boolean).join('\n') }
+  return {
+    title: n.title,
+    body: [line(volume), restingHr, digest.focus ? n.focus(digest.focus) : null].filter(Boolean).join('\n'),
+  }
 }

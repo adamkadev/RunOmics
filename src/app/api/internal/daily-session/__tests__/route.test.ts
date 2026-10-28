@@ -3,13 +3,15 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
-const { getTodayPlannedWorkout, sendPush, sent } = vi.hoisted(() => ({
-  getTodayPlannedWorkout: vi.fn(),
+const { getDailySession, lastJobRun, sendPush, sent } = vi.hoisted(() => ({
+  getDailySession: vi.fn(),
+  lastJobRun: vi.fn(),
   sendPush: vi.fn(),
   sent: new Set<string>(),
 }))
 
-vi.mock('@/application/usecases/GetPlannedWorkouts', () => ({ getTodayPlannedWorkout }))
+vi.mock('@/application/usecases/GetDailySession', () => ({ getDailySession }))
+vi.mock('@/application/usecases/JobEvents', () => ({ lastJobRun }))
 vi.mock('@/lib/sendPushNotification', () => ({ sendPush, sendPushes: vi.fn() }))
 vi.mock('@/application/usecases/SendScheduledPush', () => ({
   sendOncePer: async (_push: string, key: string, send: () => Promise<void>) => {
@@ -50,6 +52,7 @@ describe('POST /api/internal/daily-session', () => {
     vi.clearAllMocks()
     sent.clear()
     sendPush.mockResolvedValue(undefined)
+    lastJobRun.mockResolvedValue(null)
   })
 
   afterEach(() => {
@@ -58,45 +61,75 @@ describe('POST /api/internal/daily-session', () => {
   })
 
   it('announces a rest day', async () => {
-    getTodayPlannedWorkout.mockResolvedValue(null)
+    getDailySession.mockResolvedValue({ workout: null, source: null })
     const { POST } = await routeIn('en')
 
-    expect(await (await POST(request())).json()).toEqual({ sent: true, restDay: true })
-    expect(sendPush).toHaveBeenCalledWith('training', 'Rest day', 'No session scheduled today - recovery day.')
+    expect(await (await POST(request())).json()).toEqual({ sent: true, restDay: true, source: null })
+    expect(sendPush).toHaveBeenCalledWith('training', {
+      title: 'Rest day',
+      body: 'No session scheduled today - recovery day.',
+      link: '/plan',
+      tag: 'daily-session',
+    })
   })
 
   it('names the session, its distance and its duration', async () => {
-    getTodayPlannedWorkout.mockResolvedValue({ date: '2026-10-02', name: 'Strides 6 x 20s', distanceM: 8000, durationSecs: 2700 })
+    getDailySession.mockResolvedValue({ workout: { date: '2026-10-02', name: 'Strides 6 x 20s', distanceM: 8000, durationSecs: 2700 }, source: 'garmin' })
     const { POST } = await routeIn('en')
 
     await POST(request())
-    expect(sendPush).toHaveBeenCalledWith('training', "Today's session", 'Strides 6 x 20s (8.0 km · 45 min)')
+    expect(sendPush).toHaveBeenCalledWith('training', {
+      title: "Today's session",
+      body: 'Strides 6 x 20s (8.0 km · 45 min)',
+      link: '/plan',
+      tag: 'daily-session',
+    })
   })
 
   it('sends from the cron in the 08:xx Paris hour only, once a day', async () => {
-    getTodayPlannedWorkout.mockResolvedValue(null)
+    getDailySession.mockResolvedValue({ workout: null, source: null })
     const { GET, POST } = await routeIn('en')
 
     vi.useFakeTimers({ now: new Date('2026-01-15T06:20:00Z'), toFake: ['Date'] })
     expect(await (await GET(cronRequest())).json()).toEqual({ skipped: 'not 08:xx in Paris' })
 
     vi.setSystemTime(new Date('2026-01-15T07:20:00Z'))
-    expect(await (await GET(cronRequest())).json()).toEqual({ sent: true, restDay: true })
+    expect(await (await GET(cronRequest())).json()).toEqual({ sent: true, restDay: true, source: null })
     expect(await (await POST(request())).json()).toEqual({ skipped: 'already sent today' })
     expect(sendPush).toHaveBeenCalledTimes(1)
   })
 
+  it('sends from the summer 07:xx UTC cron when the 08:xx Paris run failed, and only then', async () => {
+    getDailySession.mockResolvedValue({ workout: null, source: null })
+    const { GET } = await routeIn('en')
+    vi.useFakeTimers({ now: new Date('2026-07-15T07:00:05Z'), toFake: ['Date'] })
+
+    lastJobRun.mockResolvedValue({ at: '2026-07-15T06:00:03Z', route: 'daily-session', trigger: 'cron', outcome: 'sent', status: 200 })
+    expect(await (await GET(cronRequest())).json()).toEqual({ skipped: 'not 08:xx in Paris' })
+
+    lastJobRun.mockResolvedValue({ at: '2026-07-15T06:00:03Z', route: 'daily-session', trigger: 'cron', outcome: 'error', status: 500, error: 'Error' })
+    expect(await (await GET(cronRequest())).json()).toEqual({ sent: true, restDay: true, source: null })
+  })
+
+  it('says nothing on a morning with no plan within a week either way', async () => {
+    getDailySession.mockResolvedValue(null)
+    const { POST } = await routeIn('en')
+
+    expect(await (await POST(request())).json()).toEqual({ skipped: 'nothing planned within a week' })
+    expect(sendPush).not.toHaveBeenCalled()
+  })
+
   it('speaks the deployment’s language', async () => {
-    getTodayPlannedWorkout.mockResolvedValue(null)
+    getDailySession.mockResolvedValue({ workout: null, source: null })
     const { POST: restDay } = await routeIn('fr')
     await restDay(request())
-    expect(sendPush).toHaveBeenLastCalledWith('training', 'Jour de repos', 'Aucune séance prévue aujourd’hui : place à la récupération.')
+    expect(sendPush).toHaveBeenLastCalledWith('training', expect.objectContaining({ title: 'Jour de repos', body: 'Aucune séance prévue aujourd’hui : place à la récupération.' }))
 
-    getTodayPlannedWorkout.mockResolvedValue({ date: '2026-10-02', name: 'Footing', distanceM: 8000, durationSecs: 2700 })
+    getDailySession.mockResolvedValue({ workout: { date: '2026-10-02', name: 'Footing', distanceM: 8000, durationSecs: 2700 }, source: 'coach' })
     sent.clear()
     const { POST: session } = await routeIn('fr')
     await session(request())
-    expect(sendPush).toHaveBeenLastCalledWith('training', 'Séance du jour', 'Footing (8,0 km · 45 min)')
+    expect(sendPush).toHaveBeenLastCalledWith('training', expect.objectContaining({ title: 'Séance du jour', body: 'Footing (8,0 km · 45 min)' }))
   })
 })
 
@@ -109,9 +142,9 @@ describe('every push', () => {
       const file = path.join(routes, dir, 'route.ts')
       if (!fs.existsSync(file)) continue
       const source = fs.readFileSync(file, 'utf-8')
-      if (!/sendPush(?:es)?\(/.test(source)) continue
-      // A push's title or body written as a string literal, rather than read from t.notifications.
-      if (/sendPush\([^,]+,\s*['"`]|title:\s*['"`]|body:\s*['"`]/.test(source)) offenders.push(dir)
+      if (!/send(?:Ops)?Push(?:es)?\(/.test(source)) continue
+      // A push's title or body written as a string literal, rather than read from the locale.
+      if (/sendPush\([^,]+,\s*['"`]|sendOpsPush\(\s*['"`]|title:\s*['"`]|body:\s*['"`]/.test(source)) offenders.push(dir)
     }
     expect(offenders).toEqual([])
   })

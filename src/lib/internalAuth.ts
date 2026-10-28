@@ -1,6 +1,7 @@
 import 'server-only'
 import { timingSafeEqual } from 'crypto'
 import { NextResponse, type NextRequest } from 'next/server'
+import { clientIp, createRateLimiter } from '@/lib/rateLimit'
 
 function matchesSecret(provided: string | null | undefined, secret: string | undefined): boolean {
   if (!secret || !provided) return false
@@ -18,30 +19,17 @@ export function isAuthorizedInternalRequest(req: NextRequest): boolean {
   return matchesSecret(req.headers.get('x-internal-secret'), process.env.INTERNAL_NOTIFY_SECRET)
 }
 
+/** Scoped to /api/internal/ops-push: the other deployment holds this secret, never the master internal one. */
+export function isAuthorizedOpsRequest(req: NextRequest): boolean {
+  return matchesSecret(req.headers.get('x-ops-secret'), process.env.OPS_PUSH_SECRET)
+}
+
 /** Vercel Cron sends CRON_SECRET as a bearer token and cannot send any other header. */
 export function isAuthorizedCronRequest(req: NextRequest): boolean {
   return matchesSecret(req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1], process.env.CRON_SECRET)
 }
 
-const RATE_LIMIT_MAX = 20
-const RATE_LIMIT_WINDOW_MS = 60_000
-
-const hits = new Map<string, { count: number; windowStart: number }>()
-
-function isRateLimited(ip: string, now = Date.now()): boolean {
-  const entry = hits.get(ip)
-  if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
-    if (hits.size > 1000) {
-      for (const [key, value] of hits) {
-        if (now - value.windowStart >= RATE_LIMIT_WINDOW_MS) hits.delete(key)
-      }
-    }
-    hits.set(ip, { count: 1, windowStart: now })
-    return false
-  }
-  entry.count += 1
-  return entry.count > RATE_LIMIT_MAX
-}
+const limiter = createRateLimiter({ max: 20, windowMs: 60_000, maxKeys: 1000 })
 
 export type RejectionReason = 'unauthorized' | 'rate-limited' | 'forbidden' | 'not-configured'
 
@@ -51,9 +39,7 @@ export function logRejectedRequest(req: NextRequest, reason: RejectionReason): v
 }
 
 export function guardInternalRequest(req: NextRequest, authorize: InternalAuthorizer = isAuthorizedInternalRequest): NextResponse | null {
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
-
-  if (isRateLimited(ip)) {
+  if (!limiter.take(clientIp(req), Date.now()).ok) {
     logRejectedRequest(req, 'rate-limited')
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 })
   }
